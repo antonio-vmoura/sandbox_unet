@@ -6,7 +6,9 @@
 set -euo pipefail
 
 # ---------- Variáveis e Diretórios -------------------------------------------
-DATA_DIR="${DATA_DIR:-/workspace/datasets/isic_2018_task1_unet}"
+# 1. Aqui alteramos para a pasta "isic_2018_task1_numpy"
+DATA_DIR="${DATA_DIR:-/workspace/datasets/isic_2018_task1_numpy}"
+
 LOGS_ROOT="${LOGS_ROOT:-/workspace/logs}"
 PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v1}"
 PROJECT="${LOGS_ROOT}/${PIPELINE_NAME}"
@@ -14,8 +16,8 @@ PROJECT="${LOGS_ROOT}/${PIPELINE_NAME}"
 # Se estiver usando 1 GPU para a U-Net, defina 0 ou 1.
 GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-0}"
 
-# Onde o script Python foi salvo no host (assumindo uma pasta unet_seg)
-UNET_SEG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unet_seg"
+# 2. Aqui alteramos a variável para apontar para a pasta "unet" do seu host
+UNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unet"
 
 # Diretório de logs do orquestrador
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -42,11 +44,11 @@ docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
     -e TF_FORCE_GPU_ALLOW_GROWTH=true \
     -v "$(pwd)/datasets:/workspace/datasets" \
     -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_SEG_DIR}:/workspace/unet_seg" \
+    -v "${UNET_DIR}:/workspace/unet" \
     -v /etc/passwd:/etc/passwd:ro \
     -v /etc/group:/etc/group:ro \
-    yolo26_ft \
-    python /workspace/unet_seg/train_baseline_unet.py \
+    unet_ft \
+    python /workspace/unet/train_baseline_models.py \
         --data_dir "${DATA_DIR}" \
         --project "${PROJECT}" \
         --epochs 120 \

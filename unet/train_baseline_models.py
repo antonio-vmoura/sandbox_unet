@@ -1,9 +1,8 @@
 """Phase 1 — Baseline training of U-Net on ISIC 2018 Task 1.
 
 Este script executa o treinamento do Baseline da U-Net utilizando 
-parâmetros fora da caixa (sem customização de otimizadores ou augmentations agressivas). 
-Mantemos as constantes alinhadas ao estudo original do YOLO: 
-epochs=120, patience=20, deterministic=True e seed=0 para total reprodutibilidade.
+parâmetros fora da caixa. Mantemos as constantes alinhadas ao estudo original: 
+epochs=120, patience=20, deterministic=True e seed=0.
 O AMP (Automatic Mixed Precision) fica desativado.
 
 Os dados lidos são os arrays .npy pré-processados.
@@ -22,7 +21,6 @@ from pathlib import Path
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.metrics import MeanIoU
-# Importando as camadas para a construção da U-Net Baseline
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
 from tensorflow.keras import Model
 
@@ -39,23 +37,18 @@ def set_seeds(seed=0):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
-    # Configuração determinística para operações no TensorFlow
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
 # ----------------------------------------------------------------------------
 # Construção do Modelo U-Net Baseline
 # ----------------------------------------------------------------------------
 def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
-    # primeira camada de convolução
-    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
-               padding="same")(input_tensor)
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(input_tensor)
     if batchnorm:
         x = BatchNormalization()(x)
     x = Activation("relu")(x)
     
-    # segunda camada de convolução
-    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
-               padding="same")(x)
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(x)
     if batchnorm:
         x = BatchNormalization()(x)
     x = Activation("relu")(x)
@@ -112,8 +105,9 @@ def get_unet_baseline(input_img, n_filters=16, dropout=0.1, batchnorm=True):
 # ----------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Phase 1 — Baseline training of U-Net.")
-    p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_unet",
-                   help="Diretório onde estão localizados os arquivos .npy")
+    # Atualizado para a pasta base correta que vemos na imagem
+    p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_numpy",
+                   help="Diretório base onde estão localizadas as subpastas com arquivos .npy")
     p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1",
                    help="Diretório raiz para os logs")
     p.add_argument("--epochs", type=int, default=120, help="Épocas por modelo (default: 120).")
@@ -129,7 +123,6 @@ def main():
     
     # 1. Isolamento e Determismo
     set_seeds(args.seed)
-    # Desativa o AMP para garantir consistência
     tf.keras.mixed_precision.set_global_policy('float32')
     
     run_root = Path(args.project) / VERSION / MODEL_NAME
@@ -146,22 +139,28 @@ def main():
     print(f"\n=== Iniciando PHASE 1 (BASELINE U-NET) ===")
     print(f"Epochs: {args.epochs}, Patience: {args.patience}, Seed: {args.seed}")
     
-    # 2. Carregamento dos Dados .npy
+    # 2. Carregamento dos Dados .npy (Ajustado para a estrutura da imagem)
+    data_path = Path(args.data_dir)
+    
+    p_x_train = data_path / "ISIC2018_Task1-2_Training_Input" / "ISIC2018_Task1-2_Training_Input.npy"
+    p_y_train = data_path / "ISIC2018_Task1_Training_GroundTruth" / "ISIC2018_Task1_Training_GroundTruth.npy"
+    p_x_val = data_path / "ISIC2018_Task1-2_Validation_Input" / "ISIC2018_Task1-2_Validation_Input.npy"
+    p_y_val = data_path / "ISIC2018_Task1_Validation_GroundTruth" / "ISIC2018_Task1_Validation_GroundTruth.npy"
+    
     try:
-        x_train = np.load(os.path.join(args.data_dir, "TRAINING_IMAGES.npy"))
-        y_train = np.load(os.path.join(args.data_dir, "TRAINING_MASKS.npy"))
-        x_val = np.load(os.path.join(args.data_dir, "VALIDATION_IMAGES.npy"))
-        y_val = np.load(os.path.join(args.data_dir, "VALIDATION_MASKS.npy"))
+        x_train = np.load(p_x_train)
+        y_train = np.load(p_y_train)
+        x_val = np.load(p_x_val)
+        y_val = np.load(p_y_val)
         
-        # Ajuste de dimensões e normalização básica (caso necessário)
-        # Assegurar shape (N, H, W, C)
+        # Ajuste de dimensões (N, H, W, C)
         if len(x_train.shape) == 3: x_train = np.expand_dims(x_train, axis=-1)
         if len(y_train.shape) == 3: y_train = np.expand_dims(y_train, axis=-1)
         if len(x_val.shape) == 3: x_val = np.expand_dims(x_val, axis=-1)
         if len(y_val.shape) == 3: y_val = np.expand_dims(y_val, axis=-1)
         
     except Exception as e:
-        print(f"[ERRO] Falha ao carregar os arrays .npy. Verifique o caminho {args.data_dir}.")
+        print(f"[ERRO] Falha ao carregar os arrays .npy. Verifique os caminhos em {args.data_dir}.")
         print(e)
         return 1
 
@@ -169,10 +168,9 @@ def main():
     input_img = Input((args.imgsz, args.imgsz, 3))
     model = get_unet_baseline(input_img, n_filters=16, dropout=0.1, batchnorm=True)
     
-    # Optimizer padrão do Keras sem calibração profunda
     model.compile(optimizer=Adam(), loss="binary_crossentropy", metrics=["accuracy", MeanIoU(num_classes=2)])
 
-    # 4. Callbacks para o Baseline (Idempotência e Arquivos Canônicos)
+    # 4. Callbacks para o Baseline
     callbacks = [
         EarlyStopping(patience=args.patience, verbose=1, restore_best_weights=True),
         ModelCheckpoint(str(best_pt), verbose=1, save_best_only=True, monitor='val_loss'),
