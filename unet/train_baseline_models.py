@@ -6,9 +6,7 @@ epochs=120, patience=20, deterministic=True e seed=0.
 O AMP (Automatic Mixed Precision) fica desativado.
 
 Os dados lidos são os arrays .npy pré-processados.
-
-Outputs gerados na estrutura:
-    <project>/phase1_baseline/unet_baseline/{best_model.h5, results.csv, ...}
+Métricas customizadas de Jaccard (IoU) e Dice foram adicionadas.
 """
 
 import os
@@ -20,9 +18,9 @@ import csv
 from pathlib import Path
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.metrics import MeanIoU
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
 from tensorflow.keras import Model
+import tensorflow.keras.backend as K
 
 # ----------------------------------------------------------------------------
 # Module-level configuration
@@ -30,14 +28,29 @@ from tensorflow.keras import Model
 VERSION = "phase1_baseline"
 MODEL_NAME = "unet_baseline"
 
-# ----------------------------------------------------------------------------
-# Reprodutibilidade e Constantes
-# ----------------------------------------------------------------------------
 def set_seeds(seed=0):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
+
+# ----------------------------------------------------------------------------
+# Métricas Customizadas (Jaccard/IoU e Dice)
+# ----------------------------------------------------------------------------
+def custom_iou(y_true, y_pred, smooth=1e-6):
+    """Calcula o Jaccard Similarity Index (IoU) com threshold de 0.5."""
+    y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
+    y_true_f = tf.cast(y_true, tf.float32)
+    intersection = K.sum(y_true_f * y_pred_th)
+    union = K.sum(y_true_f) + K.sum(y_pred_th) - intersection
+    return (intersection + smooth) / (union + smooth)
+
+def custom_dice(y_true, y_pred, smooth=1e-6):
+    """Calcula o Dice Similarity Coefficient (DSC) com threshold de 0.5."""
+    y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
+    y_true_f = tf.cast(y_true, tf.float32)
+    intersection = K.sum(y_true_f * y_pred_th)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_th) + smooth)
 
 # ----------------------------------------------------------------------------
 # Construção do Modelo U-Net Baseline
@@ -105,7 +118,6 @@ def get_unet_baseline(input_img, n_filters=16, dropout=0.1, batchnorm=True):
 # ----------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Phase 1 — Baseline training of U-Net.")
-    # Atualizado para a pasta base correta que vemos na imagem
     p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_numpy",
                    help="Diretório base onde estão localizadas as subpastas com arquivos .npy")
     p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1",
@@ -121,7 +133,6 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # 1. Isolamento e Determismo
     set_seeds(args.seed)
     tf.keras.mixed_precision.set_global_policy('float32')
     
@@ -137,11 +148,8 @@ def main():
         return 0
 
     print(f"\n=== Iniciando PHASE 1 (BASELINE U-NET) ===")
-    print(f"Epochs: {args.epochs}, Patience: {args.patience}, Seed: {args.seed}")
     
-    # 2. Carregamento dos Dados .npy (Ajustado para a estrutura da imagem)
     data_path = Path(args.data_dir)
-    
     p_x_train = data_path / "ISIC2018_Task1-2_Training_Input" / "ISIC2018_Task1-2_Training_Input.npy"
     p_y_train = data_path / "ISIC2018_Task1_Training_GroundTruth" / "ISIC2018_Task1_Training_GroundTruth.npy"
     p_x_val = data_path / "ISIC2018_Task1-2_Validation_Input" / "ISIC2018_Task1-2_Validation_Input.npy"
@@ -153,7 +161,6 @@ def main():
         x_val = np.load(p_x_val)
         y_val = np.load(p_y_val)
         
-        # Ajuste de dimensões (N, H, W, C)
         if len(x_train.shape) == 3: x_train = np.expand_dims(x_train, axis=-1)
         if len(y_train.shape) == 3: y_train = np.expand_dims(y_train, axis=-1)
         if len(x_val.shape) == 3: x_val = np.expand_dims(x_val, axis=-1)
@@ -164,20 +171,18 @@ def main():
         print(e)
         return 1
 
-    # 3. Construção do Modelo
     input_img = Input((args.imgsz, args.imgsz, 3))
     model = get_unet_baseline(input_img, n_filters=16, dropout=0.1, batchnorm=True)
     
-    model.compile(optimizer=Adam(), loss="binary_crossentropy", metrics=["accuracy", MeanIoU(num_classes=2)])
+    # Adicionamos as métricas customizadas na compilação do modelo
+    model.compile(optimizer=Adam(), loss="binary_crossentropy", metrics=["accuracy", custom_iou, custom_dice])
 
-    # 4. Callbacks para o Baseline
     callbacks = [
         EarlyStopping(patience=args.patience, verbose=1, restore_best_weights=True),
         ModelCheckpoint(str(best_pt), verbose=1, save_best_only=True, monitor='val_loss'),
         CSVLogger(str(csv_path), separator=',', append=False)
     ]
     
-    # 5. Treinamento
     t0 = time.perf_counter()
     history = model.fit(
         x_train, y_train,

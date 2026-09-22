@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline_unet.sh — Orquestrador para o fine-tuning do Baseline da U-Net
+# run_pipeline_unet.sh — Orquestrador para o fine-tuning da U-Net 
 # no dataset ISIC 2018 Task 1 (Arrays Numpy).
+# Inclui Fase 1 (Baseline), Fase 2 (HPO) e Fase 3 (Treino Otimizado).
 # =============================================================================
 set -euo pipefail
 
@@ -25,10 +26,16 @@ PROJECT_CONTAINER="/workspace/logs/${PIPELINE_NAME}"
 # Se estiver a usar 1 GPU para a U-Net, defina 0 ou 1.
 GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-0}"
 
+# Parâmetros HPO (Fase 2)
+HPO_ITERATIONS="${HPO_ITERATIONS:-30}"
+HPO_EPOCHS="${HPO_EPOCHS:-30}"
+HPO_PATIENCE="${HPO_PATIENCE:-10}"
+HPO_PROJECT_CONTAINER="${PROJECT_CONTAINER}/hpo"
+
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*" | tee -a "${PIPELINE_LOG}"; }
 
 log "=============================================================="
-log "U-Net ISIC 2018 Task 1 — End-to-End Pipeline (Fase 1)"
+log "U-Net ISIC 2018 Task 1 — End-to-End Pipeline (Fases 1, 2 e 3)"
 log "=============================================================="
 log "  Host Logs Dir  = ${HOST_LOGS_DIR}"
 log "  Container Data = ${DATA_DIR_CONTAINER}"
@@ -36,7 +43,10 @@ log "  device         = ${GPU_DEVICE_IDS}"
 log "  pipeline_log   = ${PIPELINE_LOG}"
 log "--------------------------------------------------------------"
 
-# Execução do Docker
+# =============================================================================
+# FASE 1: Baseline
+# =============================================================================
+log "### Fase 1 — Iniciando Baseline..."
 docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
     --ipc=host \
     --user "$(id -u):$(id -g)" \
@@ -56,6 +66,76 @@ docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
         --seed 0 \
     2>&1 | tee -a "${PIPELINE_LOG}"
 
+# Recolha de Métricas da Fase 1
+log "### Fase 1 — Coletando métricas do baseline..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    unet_ft \
+    python /workspace/unet/collect_phase_metrics_unet.py \
+        --phase baseline \
+        --project "${PROJECT_CONTAINER}" \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
+# =============================================================================
+# FASE 2: Hyperparameter Optimization (Optuna)
+# =============================================================================
+log "### Fase 2 — Iniciando HPO (Optuna)..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
+    -v "$(pwd)/datasets:/workspace/datasets" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    -v /etc/passwd:/etc/passwd:ro \
+    -v /etc/group:/etc/group:ro \
+    unet_ft \
+    bash -c "pip install optuna pyyaml -q && python /workspace/unet/tune_unet.py \
+        --data_dir \"${DATA_DIR_CONTAINER}\" \
+        --project \"${HPO_PROJECT_CONTAINER}\" \
+        --iterations ${HPO_ITERATIONS} \
+        --epochs ${HPO_EPOCHS} \
+        --patience ${HPO_PATIENCE} \
+        --batch 16 --seed 0" \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
+# =============================================================================
+# FASE 3: Treino Otimizado (Single-split)
+# =============================================================================
+log "### Fase 3 — Iniciando Treino Otimizado (usa best_hyperparameters.yaml)..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
+    -v "$(pwd)/datasets:/workspace/datasets" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    -v /etc/passwd:/etc/passwd:ro \
+    -v /etc/group:/etc/group:ro \
+    unet_ft \
+    bash -c "pip install pyyaml -q && python /workspace/unet/train_optimized_unet.py \
+        --data_dir \"${DATA_DIR_CONTAINER}\" \
+        --project \"${PROJECT_CONTAINER}\" \
+        --hpo_dir \"${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet\" \
+        --epochs 120 --patience 25 --batch 16 --seed 0" \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
+# Recolha de Métricas da Fase 3
+log "### Fase 3 — Coletando métricas otimizadas para pipeline_summary/..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    unet_ft \
+    python /workspace/unet/collect_phase_metrics_unet.py \
+        --phase optimized \
+        --project "${PROJECT_CONTAINER}" \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
 log "=============================================================="
-log "Fase 1 da U-Net finalizada. Logs: ${PIPELINE_LOG}"
+log "Pipeline U-Net (Fases 1, 2 e 3) finalizado."
 log "=============================================================="
