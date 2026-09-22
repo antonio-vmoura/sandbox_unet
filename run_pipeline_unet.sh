@@ -2,7 +2,7 @@
 # =============================================================================
 # run_pipeline_unet.sh — Orquestrador para o fine-tuning da U-Net 
 # no dataset ISIC 2018 Task 1 (Arrays Numpy).
-# Inclui Fase 1 (Baseline), Fase 2 (HPO) e Fase 3 (Treino Otimizado).
+# Inclui Fases 1 (Baseline), 2 (HPO), 3 (Optimized) e 4 (5-Fold CV).
 # =============================================================================
 set -euo pipefail
 
@@ -23,7 +23,7 @@ PIPELINE_LOG="${PIPELINE_LOG_DIR}/pipeline_unet.log"
 DATA_DIR_CONTAINER="/workspace/datasets/isic_2018_task1_numpy"
 PROJECT_CONTAINER="/workspace/logs/${PIPELINE_NAME}"
 
-# Se estiver a usar 1 GPU para a U-Net, defina 0 ou 1.
+# Configuração da GPU
 GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-0}"
 
 # Parâmetros HPO (Fase 2)
@@ -32,10 +32,13 @@ HPO_EPOCHS="${HPO_EPOCHS:-30}"
 HPO_PATIENCE="${HPO_PATIENCE:-10}"
 HPO_PROJECT_CONTAINER="${PROJECT_CONTAINER}/hpo"
 
+# Parâmetros CV (Fase 4)
+CV_K_FOLDS="${CV_K_FOLDS:-5}"
+
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*" | tee -a "${PIPELINE_LOG}"; }
 
 log "=============================================================="
-log "U-Net ISIC 2018 Task 1 — End-to-End Pipeline (Fases 1, 2 e 3)"
+log "U-Net ISIC 2018 Task 1 — End-to-End Pipeline (Fases 1 a 4)"
 log "=============================================================="
 log "  Host Logs Dir  = ${HOST_LOGS_DIR}"
 log "  Container Data = ${DATA_DIR_CONTAINER}"
@@ -93,13 +96,14 @@ docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
     -v /etc/passwd:/etc/passwd:ro \
     -v /etc/group:/etc/group:ro \
     unet_ft \
-    bash -c "pip install optuna pyyaml -q && python /workspace/unet/tune_unet.py \
-        --data_dir \"${DATA_DIR_CONTAINER}\" \
-        --project \"${HPO_PROJECT_CONTAINER}\" \
+    python /workspace/unet/tune_unet.py \
+        --data_dir "${DATA_DIR_CONTAINER}" \
+        --project "${HPO_PROJECT_CONTAINER}" \
         --iterations ${HPO_ITERATIONS} \
         --epochs ${HPO_EPOCHS} \
         --patience ${HPO_PATIENCE} \
-        --batch 16 --seed 0" \
+        --batch 16 \
+        --seed 0 \
     2>&1 | tee -a "${PIPELINE_LOG}"
 
 # =============================================================================
@@ -116,11 +120,14 @@ docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
     -v /etc/passwd:/etc/passwd:ro \
     -v /etc/group:/etc/group:ro \
     unet_ft \
-    bash -c "pip install pyyaml -q && python /workspace/unet/train_optimized_unet.py \
-        --data_dir \"${DATA_DIR_CONTAINER}\" \
-        --project \"${PROJECT_CONTAINER}\" \
-        --hpo_dir \"${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet\" \
-        --epochs 120 --patience 25 --batch 16 --seed 0" \
+    python /workspace/unet/train_optimized_unet.py \
+        --data_dir "${DATA_DIR_CONTAINER}" \
+        --project "${PROJECT_CONTAINER}" \
+        --hpo_dir "${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet" \
+        --epochs 120 \
+        --patience 25 \
+        --batch 16 \
+        --seed 0 \
     2>&1 | tee -a "${PIPELINE_LOG}"
 
 # Recolha de Métricas da Fase 3
@@ -136,6 +143,44 @@ docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
         --project "${PROJECT_CONTAINER}" \
     2>&1 | tee -a "${PIPELINE_LOG}"
 
+# =============================================================================
+# FASE 4: 5-Fold Cross-Validation
+# =============================================================================
+log "### Fase 4 — Iniciando ${CV_K_FOLDS}-Fold CV..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
+    -v "$(pwd)/datasets:/workspace/datasets" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    -v /etc/passwd:/etc/passwd:ro \
+    -v /etc/group:/etc/group:ro \
+    unet_ft \
+    python /workspace/unet/train_cv_unet.py \
+        --data_dir "${DATA_DIR_CONTAINER}" \
+        --project "${PROJECT_CONTAINER}" \
+        --hpo_dir "${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet" \
+        --k_folds ${CV_K_FOLDS} \
+        --epochs 120 \
+        --patience 25 \
+        --batch 16 \
+        --seed 0 \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
+# Consolidação da Fase 4
+log "### Fase 4 — Consolidando resultados do CV..."
+docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
+    --ipc=host \
+    --user "$(id -u):$(id -g)" \
+    -v "$(pwd)/logs:/workspace/logs" \
+    -v "${UNET_DIR}:/workspace/unet" \
+    unet_ft \
+    python /workspace/unet/consolidate_cv_results_unet.py \
+        --project "${PROJECT_CONTAINER}" \
+        --k_folds ${CV_K_FOLDS} \
+    2>&1 | tee -a "${PIPELINE_LOG}"
+
 log "=============================================================="
-log "Pipeline U-Net (Fases 1, 2 e 3) finalizado."
+log "Pipeline U-Net (Fases 1 a 4) finalizado."
 log "=============================================================="

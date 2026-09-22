@@ -224,3 +224,5 @@ cache/
 
 #datasets
 datasets/isic_2018_task1_numpy/
+
+.vscode/
