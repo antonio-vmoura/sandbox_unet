@@ -1,11 +1,8 @@
 """Phase 3 — Optimized fine-tuning of U-Net on ISIC 2018 Task 1.
 
 Este script lê o ficheiro `best_hyperparameters.yaml` gerado na Fase 2
-e treina a arquitetura U-Net utilizando esses parâmetros otimizados.
-As constantes mantêm-se: epochs=120, patience=25, deterministic=True e seed=0.
-
-Outputs gerados na estrutura:
-    <project>/phase3_optimized/unet_optimized/{best_model.h5, results.csv, args.yaml}
+e treina a arquitetura U-Net utilizando esses parâmetros otimizados,
+INCLUINDO AS TÉCNICAS DE DATA AUGMENTATION.
 """
 
 import os
@@ -20,6 +17,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
 from tensorflow.keras.optimizers import Adam, SGD
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
 from tensorflow.keras import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow.keras.backend as K
 
 VERSION = "phase3_optimized"
@@ -31,7 +29,6 @@ def set_seeds(seed=0):
     tf.random.set_seed(seed)
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
-# --- Métricas Customizadas ---
 def custom_iou(y_true, y_pred, smooth=1e-6):
     y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
     y_true_f = tf.cast(y_true, tf.float32)
@@ -45,7 +42,6 @@ def custom_dice(y_true, y_pred, smooth=1e-6):
     intersection = K.sum(y_true_f * y_pred_th)
     return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_th) + smooth)
 
-# --- Construtor U-Net ---
 def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
     x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(input_tensor)
     if batchnorm: x = BatchNormalization()(x)
@@ -76,9 +72,8 @@ def get_unet_optimized(input_img, n_filters, dropout, batchnorm):
     outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
     return Model(inputs=[input_img], outputs=[outputs])
 
-# --- CLI e Main ---
 def parse_args():
-    p = argparse.ArgumentParser(description="Phase 3 — Optimized training of U-Net.")
+    p = argparse.ArgumentParser()
     p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_numpy")
     p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1")
     p.add_argument("--hpo_dir", default="/workspace/logs/pipeline_unet_v1/hpo/hpo_v3/tune_isic_2018_task_1_unet")
@@ -120,15 +115,13 @@ def main():
 
     tuned_hp = load_tuned_hp(hp_yaml)
     
-    # Salvar os argumentos usados para a Fase 3
     with args_path.open("w") as f:
         yaml.safe_dump({"base_args": vars(args), "tuned_hp": tuned_hp}, f)
 
-    print(f"\n=== Iniciando PHASE 3 (OTIMIZADO U-NET) ===")
+    print(f"\n=== Iniciando PHASE 3 (OTIMIZADO U-NET COM AUGMENTATION) ===")
     print("Hiperparâmetros carregados:")
     for k, v in tuned_hp.items(): print(f"  {k}: {v}")
     
-    # Carregamento de Dados
     data_path = Path(args.data_dir)
     try:
         x_train = np.load(data_path / "ISIC2018_Task1-2_Training_Input" / "ISIC2018_Task1-2_Training_Input.npy")
@@ -144,7 +137,28 @@ def main():
         print(f"[ERRO] Falha ao carregar dados: {e}")
         return 1
 
-    # Construir modelo com parâmetros otimizados
+    # Construção do Gerador usando HPs otimizados (com defaults seguros)
+    data_gen_args = dict(
+        rotation_range=tuned_hp.get("rotation_range", 0),
+        width_shift_range=tuned_hp.get("width_shift_range", 0.0),
+        height_shift_range=tuned_hp.get("height_shift_range", 0.0),
+        zoom_range=tuned_hp.get("zoom_range", 0.0),
+        horizontal_flip=tuned_hp.get("horizontal_flip", False),
+        vertical_flip=tuned_hp.get("vertical_flip", False),
+        fill_mode='reflect'
+    )
+    
+    b_low = tuned_hp.get("brightness_range_low", 1.0)
+    b_high = tuned_hp.get("brightness_range_high", 1.0)
+    
+    image_datagen = ImageDataGenerator(**data_gen_args, brightness_range=[b_low, b_high])
+    mask_datagen = ImageDataGenerator(**data_gen_args)
+    
+    seed_gen = 42
+    image_generator = image_datagen.flow(x_train, batch_size=args.batch, seed=seed_gen)
+    mask_generator = mask_datagen.flow(y_train, batch_size=args.batch, seed=seed_gen)
+    train_generator = zip(image_generator, mask_generator)
+
     input_img = Input((args.imgsz, args.imgsz, 3))
     model = get_unet_optimized(
         input_img, 
@@ -153,7 +167,6 @@ def main():
         batchnorm=tuned_hp.get("batchnorm", True)
     )
     
-    # Configurar otimizador
     lr = tuned_hp.get("lr0", 1e-3)
     opt_name = tuned_hp.get("optimizer", "Adam")
     if opt_name == "Adam":
@@ -169,10 +182,12 @@ def main():
         CSVLogger(str(csv_path), separator=',', append=False)
     ]
     
+    steps_per_epoch = len(x_train) // args.batch
+    
     t0 = time.perf_counter()
     model.fit(
-        x_train, y_train,
-        batch_size=args.batch,
+        train_generator,
+        steps_per_epoch=steps_per_epoch,
         epochs=args.epochs,
         validation_data=(x_val, y_val),
         callbacks=callbacks,

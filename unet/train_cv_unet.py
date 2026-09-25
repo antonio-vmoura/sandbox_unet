@@ -1,11 +1,8 @@
 """Phase 4 — 5-Fold Cross-Validation of U-Net on ISIC 2018 Task 1.
 
-Este script junta os arrays .npy (Treino + Validação) num único pool.
-Aplica um split K-Fold determinístico (semelhante ao scikit-learn, mas apenas com NumPy)
-e treina a U-Net 5 vezes utilizando os hiperparâmetros da Fase 2.
-
-Outputs gerados:
-    <project>/cv/cv_v1/unet_cv_isic_2018/fold_{0..4}/{best_model.h5, results.csv}
+Este script junta os arrays .npy num único pool. Aplica um split K-Fold
+determinístico e treina a U-Net 5 vezes utilizando os hiperparâmetros
+da Fase 2, INCLUINDO AS AUGMENTAÇÕES DE DADOS PARA GARANTIR PARIDADE.
 """
 
 import os
@@ -19,6 +16,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
 from tensorflow.keras.optimizers import Adam, SGD
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
 from tensorflow.keras import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow.keras.backend as K
 
 VERSION = "cv_v1"
@@ -30,7 +28,6 @@ def set_seeds(seed=0):
     tf.random.set_seed(seed)
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
-# --- Métricas Customizadas ---
 def custom_iou(y_true, y_pred, smooth=1e-6):
     y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
     y_true_f = tf.cast(y_true, tf.float32)
@@ -44,7 +41,6 @@ def custom_dice(y_true, y_pred, smooth=1e-6):
     intersection = K.sum(y_true_f * y_pred_th)
     return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_th) + smooth)
 
-# --- Construtor U-Net ---
 def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
     x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(input_tensor)
     if batchnorm: x = BatchNormalization()(x)
@@ -75,7 +71,6 @@ def get_unet_cv(input_img, n_filters, dropout, batchnorm):
     outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
     return Model(inputs=[input_img], outputs=[outputs])
 
-# --- K-Fold com NumPy ---
 def build_kfold_splits(n_samples, k, seed):
     rng = np.random.RandomState(seed)
     indices = np.arange(n_samples)
@@ -94,9 +89,8 @@ def build_kfold_splits(n_samples, k, seed):
         start = stop
     return splits
 
-# --- CLI e Main ---
 def parse_args():
-    p = argparse.ArgumentParser(description="Phase 4 — CV training of U-Net.")
+    p = argparse.ArgumentParser()
     p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_numpy")
     p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1")
     p.add_argument("--hpo_dir", default="/workspace/logs/pipeline_unet_v1/hpo/hpo_v3/tune_isic_2018_task_1_unet")
@@ -129,9 +123,8 @@ def main():
         return 1
     tuned_hp = load_tuned_hp(hp_yaml)
 
-    print(f"\n=== Iniciando PHASE 4 ({args.k_folds}-FOLD CV U-NET) ===")
+    print(f"\n=== Iniciando PHASE 4 ({args.k_folds}-FOLD CV U-NET COM AUGMENTATION) ===")
     
-    # Carregamento e União dos Dados
     data_path = Path(args.data_dir)
     try:
         x_train_orig = np.load(data_path / "ISIC2018_Task1-2_Training_Input" / "ISIC2018_Task1-2_Training_Input.npy")
@@ -152,6 +145,19 @@ def main():
     
     t_total = time.perf_counter()
     
+    # Parâmetros de Data Augmentation
+    data_gen_args = dict(
+        rotation_range=tuned_hp.get("rotation_range", 0),
+        width_shift_range=tuned_hp.get("width_shift_range", 0.0),
+        height_shift_range=tuned_hp.get("height_shift_range", 0.0),
+        zoom_range=tuned_hp.get("zoom_range", 0.0),
+        horizontal_flip=tuned_hp.get("horizontal_flip", False),
+        vertical_flip=tuned_hp.get("vertical_flip", False),
+        fill_mode='reflect'
+    )
+    b_low = tuned_hp.get("brightness_range_low", 1.0)
+    b_high = tuned_hp.get("brightness_range_high", 1.0)
+    
     for k, (train_idx, val_idx) in enumerate(splits):
         print(f"\n--- Treinando Fold {k+1}/{args.k_folds} ---")
         fold_dir = cv_root / f"fold_{k}"
@@ -168,6 +174,15 @@ def main():
         
         x_train, y_train = X_pool[train_idx], Y_pool[train_idx]
         x_val, y_val = X_pool[val_idx], Y_pool[val_idx]
+        
+        # Gerador por fold
+        image_datagen = ImageDataGenerator(**data_gen_args, brightness_range=[b_low, b_high])
+        mask_datagen = ImageDataGenerator(**data_gen_args)
+        
+        seed_gen = 42 + k
+        image_generator = image_datagen.flow(x_train, batch_size=args.batch, seed=seed_gen)
+        mask_generator = mask_datagen.flow(y_train, batch_size=args.batch, seed=seed_gen)
+        train_generator = zip(image_generator, mask_generator)
 
         input_img = Input((args.imgsz, args.imgsz, 3))
         model = get_unet_cv(
@@ -178,7 +193,8 @@ def main():
         )
         
         lr = tuned_hp.get("lr0", 1e-3)
-        if tuned_hp.get("optimizer", "Adam") == "Adam":
+        opt_name = tuned_hp.get("optimizer", "Adam")
+        if opt_name == "Adam":
             opt = Adam(learning_rate=lr)
         else:
             opt = SGD(learning_rate=lr, momentum=0.9)
@@ -191,9 +207,11 @@ def main():
             CSVLogger(str(csv_path), separator=',', append=False)
         ]
         
+        steps_per_epoch = len(x_train) // args.batch
+        
         model.fit(
-            x_train, y_train,
-            batch_size=args.batch,
+            train_generator,
+            steps_per_epoch=steps_per_epoch,
             epochs=args.epochs,
             validation_data=(x_val, y_val),
             callbacks=callbacks,

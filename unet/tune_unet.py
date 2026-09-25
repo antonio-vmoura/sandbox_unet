@@ -2,6 +2,8 @@
 
 Otimização de hiperparâmetros blindada com Garbage Collection agressivo 
 para evitar deadlocks do TensorFlow e backup em SQLite (retomada automática).
+Agora inclui um espaço de busca agressivo (Data Augmentation) para garantir
+paridade e justiça na comparação com o YOLO26-seg.
 """
 
 import os
@@ -18,6 +20,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam, SGD
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
 from tensorflow.keras import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow.keras.backend as K
 
 VERSION = "hpo_v3"
@@ -76,35 +79,69 @@ def get_unet(input_img, n_filters, dropout, batchnorm):
 def create_objective(args, x_train, y_train, x_val, y_val):
     def objective(trial):
         K.clear_session()
-        gc.collect() # Limpeza forçada antes de inicializar pesos
+        gc.collect() 
         
+        # --- Parâmetros Arquiteturais e de Aprendizado ---
         lr = trial.suggest_float("lr0", 1e-4, 1e-2, log=True)
         dropout = trial.suggest_float("dropout", 0.0, 0.5)
         batchnorm = trial.suggest_categorical("batchnorm", [True, False])
-        n_filters = trial.suggest_categorical("n_filters", [8, 16, 32])
+        n_filters = trial.suggest_categorical("n_filters", [16, 32, 64]) # Elevado p/ competir
         optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD_Momentum"])
+        
+        # --- Parâmetros de Data Augmentation (Alinhados com YOLO) ---
+        rotation_range = trial.suggest_int("rotation_range", 0, 45)
+        width_shift_range = trial.suggest_float("width_shift_range", 0.0, 0.2)
+        height_shift_range = trial.suggest_float("height_shift_range", 0.0, 0.2)
+        zoom_range = trial.suggest_float("zoom_range", 0.0, 0.2)
+        horizontal_flip = trial.suggest_categorical("horizontal_flip", [True, False])
+        vertical_flip = trial.suggest_categorical("vertical_flip", [True, False])
+        brightness_range_low = trial.suggest_float("brightness_range_low", 0.5, 0.9)
+        brightness_range_high = trial.suggest_float("brightness_range_high", 1.1, 1.5)
+
+        # Configuração dos Geradores (Augmentation dinâmico)
+        data_gen_args = dict(
+            rotation_range=rotation_range,
+            width_shift_range=width_shift_range,
+            height_shift_range=height_shift_range,
+            zoom_range=zoom_range,
+            horizontal_flip=horizontal_flip,
+            vertical_flip=vertical_flip,
+            fill_mode='reflect'
+        )
+
+        image_datagen = ImageDataGenerator(**data_gen_args, brightness_range=[brightness_range_low, brightness_range_high])
+        mask_datagen = ImageDataGenerator(**data_gen_args) # A máscara não sofre alteração de brilho
+
+        # O mesmo seed garante que a imagem e a máscara sofram as exatas mesmas transformações geométricas
+        seed_gen = 42
+        image_generator = image_datagen.flow(x_train, batch_size=args.batch, seed=seed_gen)
+        mask_generator = mask_datagen.flow(y_train, batch_size=args.batch, seed=seed_gen)
+        train_generator = zip(image_generator, mask_generator)
         
         input_img = Input((args.imgsz, args.imgsz, 3))
         model = get_unet(input_img, n_filters=n_filters, dropout=dropout, batchnorm=batchnorm)
         
-        if optimizer_name == "Adam": opt = Adam(learning_rate=lr)
-        else: opt = SGD(learning_rate=lr, momentum=0.9)
+        if optimizer_name == "Adam": 
+            opt = Adam(learning_rate=lr)
+        else: 
+            opt = SGD(learning_rate=lr, momentum=0.9)
             
         model.compile(optimizer=opt, loss="binary_crossentropy", metrics=[custom_iou, custom_dice])
         callbacks = [EarlyStopping(patience=args.patience, restore_best_weights=True, monitor='val_custom_iou', mode='max')]
         
+        steps_per_epoch = len(x_train) // args.batch
+        
         history = model.fit(
-            x_train, y_train,
-            batch_size=args.batch,
+            train_generator,
+            steps_per_epoch=steps_per_epoch,
             epochs=args.epochs,
-            validation_data=(x_val, y_val),
+            validation_data=(x_val, y_val), # A validação NUNCA sofre augmentação
             callbacks=callbacks,
             verbose=0 
         )
         
         best_iou = max(history.history.get("val_custom_iou", [0.0]))
         
-        # Destruição explícita do modelo na memória de vídeo
         del model
         del history
         K.clear_session()
@@ -140,7 +177,7 @@ def main():
         print(f"[SKIP] O YAML de hiperparâmetros já existe em {best_yaml}.")
         return 0
 
-    print(f"\n=== Iniciando PHASE 2 (HPO U-NET) ===")
+    print(f"\n=== Iniciando PHASE 2 (HPO U-NET COM AUGMENTATION AGRESSIVO) ===")
     
     data_path = Path(args.data_dir)
     try:
@@ -159,7 +196,6 @@ def main():
 
     t0 = time.perf_counter()
     
-    # Integração do SQLite para persistência e retomada
     study = optuna.create_study(
         study_name="unet_hpo",
         storage=f"sqlite:///{db_path}",
@@ -168,7 +204,6 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=args.seed)
     )
     
-    # Executa apenas as iterações restantes
     remaining_trials = args.iterations - len(study.trials)
     if remaining_trials > 0:
         objective = create_objective(args, x_train, y_train, x_val, y_val)

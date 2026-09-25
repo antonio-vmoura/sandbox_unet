@@ -8,7 +8,7 @@ set -euo pipefail
 
 # ---------- Caminhos no HOST (Servidor Físico) -------------------------------
 HOST_LOGS_DIR="$(pwd)/logs"
-PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v1}"
+PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v2}"
 HOST_PROJECT_DIR="${HOST_LOGS_DIR}/${PIPELINE_NAME}"
 
 UNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unet"
@@ -24,7 +24,7 @@ DATA_DIR_CONTAINER="/workspace/datasets/isic_2018_task1_numpy"
 PROJECT_CONTAINER="/workspace/logs/${PIPELINE_NAME}"
 
 # Configuração da GPU
-GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-0}"
+GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-1}"
 
 # Parâmetros HPO (Fase 2)
 HPO_ITERATIONS="${HPO_ITERATIONS:-30}"
