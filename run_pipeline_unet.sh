@@ -8,7 +8,7 @@ set -euo pipefail
 
 # ---------- Caminhos no HOST (Servidor Físico) -------------------------------
 HOST_LOGS_DIR="$(pwd)/logs"
-PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v2}"
+PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v4}"
 HOST_PROJECT_DIR="${HOST_LOGS_DIR}/${PIPELINE_NAME}"
 
 UNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unet"

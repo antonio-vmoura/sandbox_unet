@@ -1,9 +1,10 @@
 """Phase 2 — Hyperparameter Optimization (HPO) for U-Net using Optuna.
 
-Otimização de hiperparâmetros blindada com Garbage Collection agressivo 
-para evitar deadlocks do TensorFlow e backup em SQLite (retomada automática).
-Agora inclui um espaço de busca agressivo (Data Augmentation) para garantir
-paridade e justiça na comparação com o YOLO26-seg.
+Otimização de hiperparâmetros blindada com Garbage Collection agressivo.
+Espaço de busca focado na otimização arquitetural profunda (Losses, 
+Ativações, Weight Decay e Otimizadores).
+Inclui Data Augmentation fixa para garantir paridade com YOLO, e correções
+matemáticas nas funções de perda para garantir o fluxo de gradientes.
 """
 
 import os
@@ -33,46 +34,69 @@ def set_seeds(seed=0):
     tf.random.set_seed(seed)
     os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
-def custom_iou(y_true, y_pred, smooth=1e-6):
+# --- MÉTRICAS (Usam Threshold - Apenas para avaliação) ---
+def metric_iou(y_true, y_pred, smooth=1e-6):
     y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
     y_true_f = tf.cast(y_true, tf.float32)
     intersection = K.sum(y_true_f * y_pred_th)
     union = K.sum(y_true_f) + K.sum(y_pred_th) - intersection
     return (intersection + smooth) / (union + smooth)
 
-def custom_dice(y_true, y_pred, smooth=1e-6):
+def metric_dice(y_true, y_pred, smooth=1e-6):
     y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
     y_true_f = tf.cast(y_true, tf.float32)
     intersection = K.sum(y_true_f * y_pred_th)
     return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_th) + smooth)
 
-def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
+# --- LOSSES (NÃO usam Threshold - Diferenciáveis para Backpropagation) ---
+def dice_loss(y_true, y_pred, smooth=1e-6):
+    y_true_f = tf.cast(y_true, tf.float32)
+    y_pred_f = tf.cast(y_pred, tf.float32) # Sem threshold > 0.5 aqui!
+    intersection = K.sum(y_true_f * y_pred_f)
+    dice_coeff = (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+    return 1.0 - dice_coeff
+
+def bce_dice_loss(y_true, y_pred):
+    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+    return bce + dice_loss(y_true, y_pred)
+
+# --- Construtor U-Net Modernizado ---
+def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True, activation="relu"):
     x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(input_tensor)
-    if batchnorm: x = BatchNormalization()(x)
-    x = Activation("relu")(x)
+    if batchnorm: 
+        x = BatchNormalization()(x)
+        
+    if activation == "leaky_relu": x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    elif activation == "swish": x = Activation("swish")(x)
+    else: x = Activation("relu")(x)
+        
     x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(x)
-    if batchnorm: x = BatchNormalization()(x)
-    x = Activation("relu")(x)
+    if batchnorm: 
+        x = BatchNormalization()(x)
+        
+    if activation == "leaky_relu": x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    elif activation == "swish": x = Activation("swish")(x)
+    else: x = Activation("relu")(x)
     return x
 
-def get_unet(input_img, n_filters, dropout, batchnorm):
-    c1 = conv2d_block(input_img, n_filters=n_filters*1, batchnorm=batchnorm)
+def get_unet(input_img, n_filters, dropout, batchnorm, activation):
+    c1 = conv2d_block(input_img, n_filters=n_filters*1, batchnorm=batchnorm, activation=activation)
     p1 = Dropout(dropout)(MaxPooling2D((2, 2))(c1))
-    c2 = conv2d_block(p1, n_filters=n_filters*2, batchnorm=batchnorm)
+    c2 = conv2d_block(p1, n_filters=n_filters*2, batchnorm=batchnorm, activation=activation)
     p2 = Dropout(dropout)(MaxPooling2D((2, 2))(c2))
-    c3 = conv2d_block(p2, n_filters=n_filters*4, batchnorm=batchnorm)
+    c3 = conv2d_block(p2, n_filters=n_filters*4, batchnorm=batchnorm, activation=activation)
     p3 = Dropout(dropout)(MaxPooling2D((2, 2))(c3))
-    c4 = conv2d_block(p3, n_filters=n_filters*8, batchnorm=batchnorm)
+    c4 = conv2d_block(p3, n_filters=n_filters*8, batchnorm=batchnorm, activation=activation)
     p4 = Dropout(dropout)(MaxPooling2D(pool_size=(2, 2))(c4))
-    c5 = conv2d_block(p4, n_filters=n_filters*16, batchnorm=batchnorm)
+    c5 = conv2d_block(p4, n_filters=n_filters*16, batchnorm=batchnorm, activation=activation)
     u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same')(c5)
-    c6 = conv2d_block(Dropout(dropout)(concatenate([u6, c4])), n_filters=n_filters*8, batchnorm=batchnorm)
+    c6 = conv2d_block(Dropout(dropout)(concatenate([u6, c4])), n_filters=n_filters*8, batchnorm=batchnorm, activation=activation)
     u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same')(c6)
-    c7 = conv2d_block(Dropout(dropout)(concatenate([u7, c3])), n_filters=n_filters*4, batchnorm=batchnorm)
+    c7 = conv2d_block(Dropout(dropout)(concatenate([u7, c3])), n_filters=n_filters*4, batchnorm=batchnorm, activation=activation)
     u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same')(c7)
-    c8 = conv2d_block(Dropout(dropout)(concatenate([u8, c2])), n_filters=n_filters*2, batchnorm=batchnorm)
+    c8 = conv2d_block(Dropout(dropout)(concatenate([u8, c2])), n_filters=n_filters*2, batchnorm=batchnorm, activation=activation)
     u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same')(c8)
-    c9 = conv2d_block(Dropout(dropout)(concatenate([u9, c1], axis=3)), n_filters=n_filters*1, batchnorm=batchnorm)
+    c9 = conv2d_block(Dropout(dropout)(concatenate([u9, c1], axis=3)), n_filters=n_filters*1, batchnorm=batchnorm, activation=activation)
     outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
     return Model(inputs=[input_img], outputs=[outputs])
 
@@ -81,53 +105,50 @@ def create_objective(args, x_train, y_train, x_val, y_val):
         K.clear_session()
         gc.collect() 
         
-        # --- Parâmetros Arquiteturais e de Aprendizado ---
+        # --- Espaço de Busca (Focado na Arquitetura e Gradientes) ---
         lr = trial.suggest_float("lr0", 1e-4, 1e-2, log=True)
-        dropout = trial.suggest_float("dropout", 0.0, 0.5)
-        batchnorm = trial.suggest_categorical("batchnorm", [True, False])
-        n_filters = trial.suggest_categorical("n_filters", [16, 32, 64]) # Elevado p/ competir
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+        dropout = trial.suggest_float("dropout", 0.1, 0.4)
+        n_filters = trial.suggest_categorical("n_filters", [16, 32])
+        activation = trial.suggest_categorical("activation", ["relu", "leaky_relu", "swish"])
         optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD_Momentum"])
+        loss_type = trial.suggest_categorical("loss_type", ["bce", "dice", "bce_dice"])
         
-        # --- Parâmetros de Data Augmentation (Alinhados com YOLO) ---
-        rotation_range = trial.suggest_int("rotation_range", 0, 45)
-        width_shift_range = trial.suggest_float("width_shift_range", 0.0, 0.2)
-        height_shift_range = trial.suggest_float("height_shift_range", 0.0, 0.2)
-        zoom_range = trial.suggest_float("zoom_range", 0.0, 0.2)
-        horizontal_flip = trial.suggest_categorical("horizontal_flip", [True, False])
-        vertical_flip = trial.suggest_categorical("vertical_flip", [True, False])
-        brightness_range_low = trial.suggest_float("brightness_range_low", 0.5, 0.9)
-        brightness_range_high = trial.suggest_float("brightness_range_high", 1.1, 1.5)
-
-        # Configuração dos Geradores (Augmentation dinâmico)
+        # --- Data Augmentation FIXA (Justiça contra YOLO) ---
         data_gen_args = dict(
-            rotation_range=rotation_range,
-            width_shift_range=width_shift_range,
-            height_shift_range=height_shift_range,
-            zoom_range=zoom_range,
-            horizontal_flip=horizontal_flip,
-            vertical_flip=vertical_flip,
+            rotation_range=15,
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            zoom_range=0.1,
+            horizontal_flip=True,
+            vertical_flip=True,
             fill_mode='reflect'
         )
+        image_datagen = ImageDataGenerator(**data_gen_args)
+        mask_datagen = ImageDataGenerator(**data_gen_args)
 
-        image_datagen = ImageDataGenerator(**data_gen_args, brightness_range=[brightness_range_low, brightness_range_high])
-        mask_datagen = ImageDataGenerator(**data_gen_args) # A máscara não sofre alteração de brilho
-
-        # O mesmo seed garante que a imagem e a máscara sofram as exatas mesmas transformações geométricas
-        seed_gen = 42
+        seed_gen = np.random.randint(0, 10000)
         image_generator = image_datagen.flow(x_train, batch_size=args.batch, seed=seed_gen)
         mask_generator = mask_datagen.flow(y_train, batch_size=args.batch, seed=seed_gen)
         train_generator = zip(image_generator, mask_generator)
         
         input_img = Input((args.imgsz, args.imgsz, 3))
-        model = get_unet(input_img, n_filters=n_filters, dropout=dropout, batchnorm=batchnorm)
+        
+        # Batchnorm fixado em True para estabilidade profunda
+        model = get_unet(input_img, n_filters=n_filters, dropout=dropout, batchnorm=True, activation=activation)
         
         if optimizer_name == "Adam": 
-            opt = Adam(learning_rate=lr)
+            opt = Adam(learning_rate=lr, weight_decay=weight_decay)
         else: 
-            opt = SGD(learning_rate=lr, momentum=0.9)
+            momentum = trial.suggest_float("momentum", 0.85, 0.98)
+            opt = SGD(learning_rate=lr, momentum=momentum, weight_decay=weight_decay)
             
-        model.compile(optimizer=opt, loss="binary_crossentropy", metrics=[custom_iou, custom_dice])
-        callbacks = [EarlyStopping(patience=args.patience, restore_best_weights=True, monitor='val_custom_iou', mode='max')]
+        if loss_type == "bce": loss_fn = "binary_crossentropy"
+        elif loss_type == "dice": loss_fn = dice_loss
+        else: loss_fn = bce_dice_loss
+            
+        model.compile(optimizer=opt, loss=loss_fn, metrics=[metric_iou, metric_dice])
+        callbacks = [EarlyStopping(patience=args.patience, restore_best_weights=True, monitor='val_metric_iou', mode='max')]
         
         steps_per_epoch = len(x_train) // args.batch
         
@@ -135,12 +156,12 @@ def create_objective(args, x_train, y_train, x_val, y_val):
             train_generator,
             steps_per_epoch=steps_per_epoch,
             epochs=args.epochs,
-            validation_data=(x_val, y_val), # A validação NUNCA sofre augmentação
+            validation_data=(x_val, y_val), # Validação NUNCA recebe augmentation
             callbacks=callbacks,
             verbose=0 
         )
         
-        best_iou = max(history.history.get("val_custom_iou", [0.0]))
+        best_iou = max(history.history.get("val_metric_iou", [0.0]))
         
         del model
         del history
@@ -177,7 +198,7 @@ def main():
         print(f"[SKIP] O YAML de hiperparâmetros já existe em {best_yaml}.")
         return 0
 
-    print(f"\n=== Iniciando PHASE 2 (HPO U-NET COM AUGMENTATION AGRESSIVO) ===")
+    print(f"\n=== Iniciando PHASE 2 (HPO U-NET ARQUITETURAL) ===")
     
     data_path = Path(args.data_dir)
     try:
