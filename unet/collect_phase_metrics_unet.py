@@ -13,16 +13,16 @@ from pathlib import Path
 
 DEFAULT_ORDER = ["unet"]
 
-# Atualizado com as novas métricas customizadas
+# Atualizado com as métricas que o Keras gerou no seu results.csv
 METRIC_KEYS = {
     "train_loss": "loss",
     "train_acc": "accuracy",
-    "train_iou": "custom_iou", 
-    "train_dice": "custom_dice",
+    "train_iou": "metric_iou", 
+    "train_dice": "metric_dice",
     "val_loss": "val_loss",
     "val_acc": "val_accuracy",
-    "val_iou": "val_custom_iou",
-    "val_dice": "val_custom_dice"
+    "val_iou": "val_metric_iou",
+    "val_dice": "val_metric_dice"
 }
 
 BEST_EPOCH_KEY = "val_loss"

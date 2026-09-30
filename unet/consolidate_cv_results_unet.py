@@ -1,7 +1,7 @@
 """Consolidate Phase 4 (Cross-Validation) results into CSV+JSON.
 
 Este script lê os N ficheiros results.csv gerados pelos Folds da Fase 4,
-extrai as métricas baseadas no melhor 'val_custom_iou' e calcula a média
+extrai as métricas baseadas no melhor 'val_metric_iou' e calcula a média
 e desvio padrão para construir a tabela final do artigo.
 """
 
@@ -12,17 +12,18 @@ import statistics
 import sys
 from pathlib import Path
 
+# Atualizado com as métricas que o Keras gerou
 METRIC_KEYS = {
     "train_loss": "loss",
     "train_acc": "accuracy",
-    "train_iou": "custom_iou", 
-    "train_dice": "custom_dice",
+    "train_iou": "metric_iou", 
+    "train_dice": "metric_dice",
     "val_loss": "val_loss",
     "val_acc": "val_accuracy",
-    "val_iou": "val_custom_iou",
-    "val_dice": "val_custom_dice"
+    "val_iou": "val_metric_iou",
+    "val_dice": "val_metric_dice"
 }
-BEST_EPOCH_KEY = "val_custom_iou"
+BEST_EPOCH_KEY = "val_metric_iou"
 
 def parse_args():
     p = argparse.ArgumentParser(description="Consolida resultados CV da U-Net.")
