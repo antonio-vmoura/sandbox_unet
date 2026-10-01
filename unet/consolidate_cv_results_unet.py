@@ -1,124 +1,89 @@
-"""Consolidate Phase 4 (Cross-Validation) results into CSV+JSON.
+"""Consolidate Phase 2 (cross-validation) results into a paper-ready CSV + JSON.
 
-Este script lê os N ficheiros results.csv gerados pelos Folds da Fase 4,
-extrai as métricas baseadas no melhor 'val_metric_iou' e calcula a média
-e desvio padrão para construir a tabela final do artigo.
+Reads ``<project>/phase2_cv_<protocol>/<model>/metrics_summary.json`` written
+by :mod:`train_cv_unet` and writes, in the YOLO26 format, under
+``<project>/summary/``:
+
+* ``phase2_cv_<protocol>.csv`` — one row per model with ``mean`` and ``std``
+  (sample std, ddof=1) of every metric: the YOLO26 instance-metric columns
+  (NaN for the U-Net) followed by the U-Net validation pixel metrics.
+* ``phase2_cv_<protocol>.json`` — per-fold metrics and the aggregate.
+
+Usage:
+    python consolidate_cv_results_unet.py --project /workspace/logs/pipeline_final_v1
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
 import json
-import statistics
 import sys
 from pathlib import Path
 
-# Atualizado com as métricas que o Keras gerou
-METRIC_KEYS = {
-    "train_loss": "loss",
-    "train_acc": "accuracy",
-    "train_iou": "metric_iou", 
-    "train_dice": "metric_dice",
-    "val_loss": "val_loss",
-    "val_acc": "val_accuracy",
-    "val_iou": "val_metric_iou",
-    "val_dice": "val_metric_dice"
-}
-BEST_EPOCH_KEY = "val_metric_iou"
+from common import DEFAULT_ORDER, DEFAULT_PIPELINE_ROOT, PipelinePaths, atomic_write_json
+from train_cv_unet import VAL_KEYS, YOLO_INSTANCE_KEYS
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Consolida resultados CV da U-Net.")
-    p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1")
-    p.add_argument("--cv_version", default="cv_v1")
-    p.add_argument("--k_folds", type=int, default=5)
+#: Reported metrics: YOLO26's list first (same column order), then the U-Net's.
+REPORT_METRICS: list[str] = [
+    "map50_b", "map5095_b", "precision_b", "recall_b", "f1_b",
+    "map50_m", "map5095_m", "precision_m", "recall_m", "f1_m",
+    "best_epoch", "epochs_trained", *VAL_KEYS,
+]
+assert set(YOLO_INSTANCE_KEYS) <= set(REPORT_METRICS)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    p = argparse.ArgumentParser(description="Consolidate Phase 2 CV results into CSV + JSON.")
+    p.add_argument("--models", nargs="+", default=DEFAULT_ORDER, choices=DEFAULT_ORDER)
+    p.add_argument("--project", default=DEFAULT_PIPELINE_ROOT, help="Pipeline root.")
+    p.add_argument("--protocol", choices=["baseline", "optimized"], default="baseline")
     return p.parse_args()
 
-def get_actual_metric_name(headers: list, target: str) -> str:
-    for h in headers:
-        if target in h: return h
-    return target
 
-def parse_best_epoch(results_csv: Path) -> dict:
-    rows = []
-    with results_csv.open() as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-        for row in reader:
-            rows.append({k.strip(): v for k, v in row.items()})
-            
-    actual_best_key = get_actual_metric_name(headers, BEST_EPOCH_KEY)
-    
-    def get_float_safe(row, key):
-        try: return float(row.get(key, "-inf") or "-inf")
-        except ValueError: return float('-inf')
+def main() -> int:
+    """Consolidate CV summaries.
 
-    # Na U-Net (Fase 3/4) maximizamos o IoU, pelo que procuramos o 'max'
-    best_row = max(rows, key=lambda r: get_float_safe(r, actual_best_key))
-
-    out = {}
-    for short_name, full_name in METRIC_KEYS.items():
-        actual_name = get_actual_metric_name(headers, full_name)
-        out[short_name] = float(best_row.get(actual_name, "0") or 0.0)
-    out["best_epoch"] = float(best_row.get("epoch", "0") or 0.0)
-    return out
-
-def main():
+    Returns:
+        ``0`` if every requested model has a summary, ``1`` otherwise.
+    """
     args = parse_args()
-    project = Path(args.project).resolve()
-    cv_root = project / "cv" / args.cv_version / "unet_cv_isic_2018"
-    out_dir = project / "pipeline_summary"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = PipelinePaths(Path(args.project).resolve())
+    paths.summary_dir.mkdir(parents=True, exist_ok=True)
+    per_model, missing = [], []
+    for m in args.models:
+        path = paths.cv_model_dir(m, args.protocol) / "metrics_summary.json"
+        if not path.exists():
+            print(f"  [warn] CV summary not found for {m}: {path}")
+            missing.append(m)
+            continue
+        payload = json.loads(path.read_text())
+        if payload.get("std_ddof") != 1:
+            print(f"  [warn] {m}: summary is not ddof=1 — re-run Phase 2 to refresh it")
+        per_model.append({"model": m, "n_folds": payload["n_folds"], "summary": payload["summary"],
+                          "per_fold": payload["per_fold"], "source": str(path)})
+        s = payload["summary"]
+        print(f"  {m:<8} : k={payload['n_folds']} | val DSC={s['val_dsc']['mean']:.4f}±{s['val_dsc']['std']:.4f}  "
+              f"JSI={s['val_jsi']['mean']:.4f}±{s['val_jsi']['std']:.4f}")
 
-    per_fold_metrics = []
-    
-    for k in range(args.k_folds):
-        csv_path = cv_root / f"fold_{k}" / "results.csv"
-        if not csv_path.exists():
-            print(f"[ERRO] CSV do fold {k} não encontrado: {csv_path}")
-            return 1
-        metrics = parse_best_epoch(csv_path)
-        metrics["fold"] = k
-        per_fold_metrics.append(metrics)
+    csv_path = paths.summary_dir / f"phase2_cv_{args.protocol}.csv"
+    if per_model:
+        with csv_path.open("w", newline="") as f:
+            fields = ["model", "n_folds"] + [f"{k}_{s}" for k in REPORT_METRICS for s in ("mean", "std")]
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for e in per_model:
+                row = {"model": e["model"], "n_folds": e["n_folds"]}
+                for k in REPORT_METRICS:
+                    v = e["summary"].get(k, {})
+                    row[f"{k}_mean"], row[f"{k}_std"] = v.get("mean", ""), v.get("std", "")
+                w.writerow(row)
+    atomic_write_json(paths.summary_dir / f"phase2_cv_{args.protocol}.json",
+                      {"protocol": args.protocol, "models": per_model, "missing": missing})
+    print(f"\nConsolidated: {csv_path}")
+    return 0 if not missing else 1
 
-    # Cálculo da Média e Desvio Padrão
-    summary = {}
-    metric_names = list(METRIC_KEYS.keys()) + ["best_epoch"]
-    
-    for key in metric_names:
-        values = [m[key] for m in per_fold_metrics]
-        summary[key] = {
-            "mean": statistics.mean(values),
-            "std": statistics.pstdev(values) if len(values) > 1 else 0.0
-        }
-
-    # Gerar JSON
-    payload = {
-        "model": "unet",
-        "n_folds": args.k_folds,
-        "per_fold": per_fold_metrics,
-        "summary": summary
-    }
-    
-    with open(out_dir / "cv_consolidated.json", "w") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        
-    # Gerar CSV
-    csv_headers = ["model", "n_folds"]
-    for k in metric_names:
-        csv_headers.extend([f"{k}_mean", f"{k}_std"])
-        
-    with open(out_dir / "cv_consolidated.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=csv_headers)
-        w.writeheader()
-        row = {"model": "unet", "n_folds": args.k_folds}
-        for k in metric_names:
-            row[f"{k}_mean"] = summary[k]["mean"]
-            row[f"{k}_std"] = summary[k]["std"]
-        w.writerow(row)
-
-    print(f"\n[SUCESSO] Artefatos CV Consolidados salvos em: {out_dir}")
-    print(f"  Val IoU (Jaccard): {summary['val_iou']['mean']:.4f} ± {summary['val_iou']['std']:.4f}")
-    print(f"  Val Dice (DSC): {summary['val_dice']['mean']:.4f} ± {summary['val_dice']['std']:.4f}")
-    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

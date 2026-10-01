@@ -1,141 +1,89 @@
-"""Consolidate single-split Phase 1 / Phase 3 metrics into CSV + JSON for U-Net.
+"""Consolidate single-split validation metrics of Phase 1 or Phase 4 into CSV + JSON.
 
-Para uma fase específica ('baseline' para a Fase 1 ou 'optimized' para a Fase 3),
-este script percorre o arquivo results.csv gerado pelo Keras, seleciona a melhor época
-baseada na menor `val_loss`, e grava um CSV + JSON.
+For each model this script reads the run's validation metrics at the epoch
+that produced ``best.pt`` (:func:`training.best_metrics`) and writes, in the
+YOLO26 format::
+
+    <project>/summary/<phase>_val.csv
+    <project>/summary/<phase>_val.json
+
+The YOLO26 instance-metric columns (box/mask mAP, P, R, F1) are written as NaN
+(not defined for a semantic-segmentation network); the U-Net's pixel metrics
+are reported in the ``val_*`` columns (256 × 256 validation resolution).
+These are **validation-split** metrics; test-set metrics come from Phase 5.
+
+Usage:
+    python collect_phase_metrics_unet.py --phase phase1 --project /workspace/logs/pipeline_final_v1
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 
-DEFAULT_ORDER = ["unet"]
+from common import DEFAULT_ORDER, DEFAULT_PIPELINE_ROOT, PipelinePaths, atomic_write_json, read_json
+from train_cv_unet import fold_row
+from training import RUN_STATE_FILE, best_metrics
 
-# Atualizado com as métricas que o Keras gerou no seu results.csv
-METRIC_KEYS = {
-    "train_loss": "loss",
-    "train_acc": "accuracy",
-    "train_iou": "metric_iou", 
-    "train_dice": "metric_dice",
-    "val_loss": "val_loss",
-    "val_acc": "val_accuracy",
-    "val_iou": "val_metric_iou",
-    "val_dice": "val_metric_dice"
-}
-
-BEST_EPOCH_KEY = "val_loss"
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Coleta as métricas do Keras.")
-    p.add_argument("--phase", choices=["baseline", "optimized"], required=True)
-    p.add_argument("--models", nargs="+", default=DEFAULT_ORDER)
-    p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1")
-    p.add_argument("--out-dir", default=None)
+    """Parse command-line arguments."""
+    p = argparse.ArgumentParser(description="Collect single-split validation metrics (Phase 1 or 4).")
+    p.add_argument("--phase", choices=["phase1", "phase4"], required=True)
+    p.add_argument("--models", nargs="+", default=DEFAULT_ORDER, choices=DEFAULT_ORDER)
+    p.add_argument("--project", default=DEFAULT_PIPELINE_ROOT, help="Pipeline root.")
     return p.parse_args()
 
-def results_csv_path(project: Path, phase: str, model: str) -> Path:
-    if phase == "baseline":
-        return project / "phase1_baseline" / f"{model}_baseline" / "results.csv"
-    return project / "phase3_optimized" / f"{model}_optimized" / "results.csv"
 
-def get_actual_metric_name(headers: list, target: str) -> str:
-    for h in headers:
-        if target in h:
-            return h
-    return target
+def run_dir(paths: PipelinePaths, phase: str, model: str) -> Path:
+    """Training run directory of ``model`` in ``phase``."""
+    if phase == "phase1":
+        return paths.phase1_dir / paths.phase1_run_name(model)
+    return paths.phase4_dir / paths.phase4_run_name(model)
 
-def parse_best_epoch_metrics(results_csv: Path) -> dict:
-    rows = []
-    with results_csv.open() as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-        for row in reader:
-            rows.append({k.strip(): v for k, v in row.items()})
-            
-    if not rows:
-        raise ValueError(f"O results.csv está vazio: {results_csv}")
 
-    actual_best_key = get_actual_metric_name(headers, BEST_EPOCH_KEY)
-    
-    def get_float_safe(row, key):
-        try:
-            return float(row.get(key, "inf") or "inf")
-        except ValueError:
-            return float('inf')
-
-    best_row = min(rows, key=lambda r: get_float_safe(r, actual_best_key))
-
-    out = {}
-    for short_name, full_name in METRIC_KEYS.items():
-        actual_name = get_actual_metric_name(headers, full_name)
-        out[short_name] = float(best_row.get(actual_name, "0") or 0.0)
-        
-    out["best_epoch"] = float(best_row.get("epoch", "0") or 0.0)
-    return out
-
-def _collect_model_row(project: Path, phase: str, model: str) -> dict:
-    csv_path = results_csv_path(project, phase, model)
-    if not csv_path.exists():
-        print(f"  [warn] results.csv não encontrado para {model}: {csv_path}")
+def collect_row(paths: PipelinePaths, phase: str, model: str) -> dict | None:
+    """One consolidated row, or ``None`` if the run is missing/incomplete."""
+    rd = run_dir(paths, phase, model)
+    state = read_json(rd / RUN_STATE_FILE)
+    if state is None or state.get("status") != "complete":
+        print(f"  [warn] {model}: run not complete ({rd})")
         return None
-    try:
-        metrics = parse_best_epoch_metrics(csv_path)
-    except Exception as e:
-        print(f"  [error] Falha ao ler {csv_path}: {e}")
-        return None
-        
-    print(
-        f"  {model:<8} : "
-        f"Melhor Época={metrics['best_epoch']:.0f} | "
-        f"Val Loss={metrics['val_loss']:.4f} | "
-        f"Val IoU={metrics['val_iou']:.4f} | "
-        f"Val Dice={metrics['val_dice']:.4f}"
-    )
-    return {"model": model, "results_csv": str(csv_path), **metrics}
+    metrics = best_metrics(rd)
+    resumed = any(e.get("event") == "resume" for e in state.get("events", []))
+    print(f"  {model:<8} : val DSC={metrics['val_dsc']:.4f} JSI={metrics['val_jsi']:.4f} "
+          f"JSI_thr={metrics['val_jsi_thr']:.4f} (best epoch {metrics['best_epoch']})")
+    return {"model": model, "split": "val", "resumed": resumed, "run_dir": str(rd), **fold_row(metrics)}
 
-def _write_artifacts(phase: str, per_model: list, missing: list, out_dir: Path):
-    csv_out = out_dir / f"{phase}_metrics.csv"
-    json_out = out_dir / f"{phase}_metrics.json"
 
-    if per_model:
-        fieldnames = ["model", "best_epoch"] + list(METRIC_KEYS.keys()) + ["results_csv"]
-        with csv_out.open("w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames)
-            w.writeheader()
-            for row in per_model:
-                w.writerow(row)
+def main() -> int:
+    """Collect per-model metrics for one phase and write CSV + JSON.
 
-    with json_out.open("w") as f:
-        json.dump({"phase": phase, "models": per_model, "missing": missing}, f, indent=2, sort_keys=True)
-    return csv_out, json_out
-
-def main():
+    Returns:
+        ``0`` if every requested model was collected, ``1`` otherwise.
+    """
     args = parse_args()
-    project = Path(args.project).resolve()
-    out_dir = Path(args.out_dir) if args.out_dir else project / "pipeline_summary"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    per_model = []
-    missing = []
-
-    print(f"Coletando métricas da fase: {args.phase.upper()}")
+    paths = PipelinePaths(Path(args.project))
+    paths.summary_dir.mkdir(parents=True, exist_ok=True)
+    rows, missing = [], []
     for m in args.models:
-        row = _collect_model_row(project, args.phase, m)
-        if row is None:
-            missing.append(m)
-            continue
-        per_model.append(row)
-
-    if per_model:
-        csv_out, json_out = _write_artifacts(args.phase, per_model, missing, out_dir)
-        print("\nArtefatos gerados com sucesso!")
-        
+        row = collect_row(paths, args.phase, m)
+        (rows.append(row) if row else missing.append(m))
+    csv_out = paths.summary_dir / f"{args.phase}_val.csv"
+    json_out = paths.summary_dir / f"{args.phase}_val.json"
+    if rows:
+        with csv_out.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+    atomic_write_json(json_out, {"phase": args.phase, "split": "val", "models": rows, "missing": missing})
+    print(f"\nGenerated: {csv_out}\n           {json_out}")
     if missing:
-        print(f"  [warn] Nenhum resultado para: {missing}")
-        return 1
-    return 0
+        print(f"  [warn] missing/incomplete: {missing}")
+    return 0 if not missing else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

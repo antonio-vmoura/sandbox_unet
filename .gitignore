@@ -226,3 +226,5 @@ cache/
 datasets/isic_2018_task1_numpy/
 
 .vscode/
+# Phase 0 cache (U-Net, ~900 MB of .npy) and its backups / temporary builds
+datasets/isic_2018_task1_unet256*/
