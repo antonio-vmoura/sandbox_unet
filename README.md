@@ -106,6 +106,7 @@ docker build -t unet_ft .
 GPU=1                                  # host GPU index
 PIPELINE_NAME="pipeline_final_v1"
 
+mkdir -p "logs/${PIPELINE_NAME}"     # the terminal log goes inside the pipeline folder
 docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     --user "$(id -u):$(id -g)" \
     -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
@@ -119,7 +120,7 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
     unet_ft \
     bash /workspace/run_pipeline_unet.sh \
-    2>&1 | tee "logs/${PIPELINE_NAME}_$(date -u +%Y%m%dT%H%M%SZ).log"
+    2>&1 | tee "logs/${PIPELINE_NAME}/terminal_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
 * The YOLO26 dataset is mounted **read-only** (it is the source of truth) at `/workspace/yolo26_dataset`, a
