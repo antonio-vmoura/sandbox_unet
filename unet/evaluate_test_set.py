@@ -8,7 +8,7 @@ is evaluated on the ``test`` split — the only phase that ever touches it:
 
 * **Pixel metrics** (:mod:`inference`) — per image, batch = 1: the U-Net
   probability map (256×256) is upsampled bilinearly to the image's original
-  resolution (640×640, as YOLO26's evaluation) and thresholded at 0.5; it is
+  resolution (dataset resolution, as YOLO26's evaluation) and thresholded at 0.5; it is
   scored against the ground truth rasterised from the **same YOLO labels**
   with :func:`segmentation_metrics.pixel_scores`: DSC, JSI, ISIC thresholded
   JSI, sensitivity, specificity, accuracy. Empty predictions score 0 (never

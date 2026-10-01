@@ -15,8 +15,8 @@
 #                                    resolution and profiling as YOLO26)
 #
 # Every phase shares one base setup (U-Net 16 filters, ReLU, BN, AdamW,
-# constant LR, BCE+Dice, batch 16, FP32, seed 0; epochs=120 / patience=25 for
-# Phases 1, 2 and 4), defined once in unet/common.py, so the tuned
+# constant LR, BCE+Dice, batch 16, FP32, seed 0; epochs=120 / patience=120 =
+# no early stopping, for Phases 1, 2 and 4; HPO trials 30 / 30), defined once in unet/common.py, so the tuned
 # hyperparameters (learning dynamics + augmentation) are the only variable
 # between Baseline and Optimised.
 #
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 # ---------- Defaults ---------------------------------------------------------
-YOLO_DATA_YAML="${YOLO_DATA_YAML:-/workspace/datasets/isic_2018_task1_yolo26/data.yaml}"
+YOLO_DATA_YAML="${YOLO_DATA_YAML:-/workspace/yolo26_dataset/data.yaml}"
 CACHE_DIR="${CACHE_DIR:-/workspace/datasets/isic_2018_task1_unet256}"
 LOGS_ROOT="${LOGS_ROOT:-/workspace/logs}"
 PIPELINE_NAME="${PIPELINE_NAME:-pipeline_final_v1}"
@@ -50,7 +50,7 @@ MODELS=(unet)
 PHASES=(0 1 2 3 4 5)
 
 # Training budget of Phases 1, 2 and 4 (empty = defaults in common.py:
-# 120 epochs / patience 25). Override ONLY for smoke tests.
+# 120 epochs / patience 120). Override ONLY for smoke tests.
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-}"
 TRAIN_PATIENCE="${TRAIN_PATIENCE:-}"
 
@@ -61,7 +61,7 @@ CV_SEED="${CV_SEED:-0}"
 # Phase 3 (HPO) — same budget as YOLO26's HPO.
 HPO_ITERATIONS="${HPO_ITERATIONS:-30}"
 HPO_EPOCHS_PER_TRIAL="${HPO_EPOCHS_PER_TRIAL:-30}"
-HPO_PATIENCE="${HPO_PATIENCE:-10}"
+HPO_PATIENCE="${HPO_PATIENCE:-30}"   # = epochs per trial: no early stopping
 HPO_MAX_RETRIES="${HPO_MAX_RETRIES:-5}"
 HPO_RETRY_WAIT="${HPO_RETRY_WAIT:-600}"
 
@@ -251,14 +251,14 @@ log "  cache          = ${CACHE_DIR}"
 log "  project        = ${PROJECT}"
 log "  device         = ${GPU_DEVICE}   (Phase 5 bench device = ${BENCH_DEVICE})"
 log "  phases         = ${PHASES[*]}"
-log "  train budget   = ${TRAIN_EPOCHS:-120 (default)} epochs, patience ${TRAIN_PATIENCE:-25 (default)}  [Phases 1, 2, 4]"
+log "  train budget   = ${TRAIN_EPOCHS:-120 (default)} epochs, patience ${TRAIN_PATIENCE:-120 (default)}  [Phases 1, 2, 4]"
 log "  cv             = k=${CV_K_FOLDS}, seed=${CV_SEED}"
 log "  hpo            = Optuna TPE, trials=${HPO_ITERATIONS}, ep/trial=${HPO_EPOCHS_PER_TRIAL}, retries=${HPO_MAX_RETRIES} x ${HPO_RETRY_WAIT}s"
 log "  precisions     = ${EVAL_PRECISIONS}  [Phase 5]"
 log "  force          = ${FORCE_FLAG:-<off>}"
 log "  unet_dir       = ${UNET_DIR}"
 if [[ -n "${TRAIN_EPOCHS}${TRAIN_PATIENCE}" ]]; then
-    log "  [aviso] orçamento de treino diferente do protocolo (120/25) — use apenas para smoke tests."
+    log "  [aviso] orçamento de treino diferente do protocolo (120/120) — use apenas para smoke tests."
 fi
 log "--------------------------------------------------------------"
 

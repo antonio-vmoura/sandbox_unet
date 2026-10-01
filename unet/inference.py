@@ -1,9 +1,9 @@
 """Full-resolution U-Net inference and pixel scoring (Phase 2 pixel step, Phase 5).
 
 To make U-Net and YOLO26 scores directly comparable, predictions are scored
-**exactly like YOLO26's**: against the ground truth rasterised from the same
-YOLO polygon labels (:func:`segmentation_metrics.rasterize_yolo_label`) at
-each image's original resolution (640 × 640 in the YOLO export), with the same
+**exactly like YOLO26's**: against the same official ground-truth masks
+(:func:`segmentation_metrics.ground_truth_mask`) at each image's resolution in
+the shared dataset (the working resolution of Phase 0), with the same
 per-image metric definitions (:func:`segmentation_metrics.pixel_scores`).
 
 Prediction pipeline (per image):
@@ -34,25 +34,29 @@ import torch
 import torch.nn.functional as F
 
 from data import CacheData
-from segmentation_metrics import pixel_scores, rasterize_yolo_label
+from segmentation_metrics import ground_truth_mask, pixel_scores
 
 #: Version of the evaluation method (part of the result cache keys).
-EVAL_VERSION: int = 1
+EVAL_VERSION: int = 2   # 2: + boundary metrics (BIoU, NSD)
 
 #: Probability threshold of the binary prediction.
 PROB_THRESHOLD: float = 0.5
 
-#: Container location of the YOLO dataset (fallback for the data root).
-DEFAULT_YOLO_ROOT: str = "/workspace/datasets/isic_2018_task1_yolo26"
+#: Container locations of the YOLO dataset (fallbacks for the data root): the
+#: mount used by the README / wait_gpu_unet.sh, then the former nested mount.
+DEFAULT_YOLO_ROOTS: tuple[str, ...] = ("/workspace/yolo26_dataset", "/workspace/datasets/isic2018_task1_official",
+                                       "/workspace/datasets/isic_2018_task1_yolo26")
 
 
 def resolve_data_root(cache: CacheData, override: str | None = None) -> Path:
     """Root of the YOLO dataset holding the original images and labels.
 
-    Order: explicit override → the root recorded by Phase 0 → the Docker mount.
+    Order: explicit override → the root recorded by Phase 0 → the Docker mounts.
+    Empty folders are skipped (an older nested ``docker run -v`` left an empty
+    mount-point folder at the former location).
     """
-    for cand in (override, cache.meta.get("source_root"), DEFAULT_YOLO_ROOT):
-        if cand and Path(cand).is_dir():
+    for cand in (override, cache.meta.get("source_root"), *DEFAULT_YOLO_ROOTS):
+        if cand and Path(cand).is_dir() and any(Path(cand).iterdir()):
             return Path(cand)
     raise FileNotFoundError("YOLO dataset root not found; pass --data-root")
 
@@ -109,7 +113,7 @@ def evaluate_ids(
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         infer_ms = (time.perf_counter() - t0) * 1000
-        gt = rasterize_yolo_label(data_root / rec["label"], h, w)
+        gt = ground_truth_mask(data_root / rec["image"], h, w)
         image_path = data_root / rec["image"]
         if mask_dir is not None:
             cv2.imwrite(str(Path(mask_dir) / f"{image_path.stem}.png"), pred.astype(np.uint8) * 255)

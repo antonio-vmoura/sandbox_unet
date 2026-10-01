@@ -9,8 +9,10 @@
 # 3. Após ``REQUIRED_IDLE_MINUTES`` verificações ociosas consecutivas, executa
 #    o bloco ``docker run`` abaixo.
 #
-# O pipeline é retomável: relançar o mesmo comando continua um estudo
-# interrompido em vez de recomeçá-lo.
+# O pipeline é retomável: relançar o mesmo comando (SEM --force) continua um
+# estudo interrompido em vez de recomeçá-lo. Argumentos extras são repassados
+# ao run_pipeline_unet.sh (ex.: ./wait_gpu_unet.sh --phases "1 2 3 4 5" --force).
+# O log do terminal fica em logs/${PIPELINE_NAME}/terminal_<UTC>.log.
 # =============================================================================
 
 GPU_DEVICE="${GPU_DEVICE:-0}"
@@ -42,18 +44,22 @@ while true; do
     sleep $CHECK_INTERVAL
 done
 
-# O dataset YOLO26 (fonte única de verdade) é montado somente-leitura; o cache
+# O dataset YOLO26 (fonte única de verdade) é montado somente-leitura em
+# /workspace/yolo26_dataset — ao lado de datasets/, nunca dentro (um mount
+# aninhado faz o Docker criar no host uma pasta vazia de root); o cache
 # 256×256 da Fase 0 é escrito em datasets/isic_2018_task1_unet256.
+mkdir -p "logs/${PIPELINE_NAME}"
 docker run --gpus "\"device=${GPU_DEVICE}\"" --rm --ipc=host \
   --user "$(id -u):$(id -g)" \
   -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
   -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
+  -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
   -v "$(pwd)/datasets:/workspace/datasets" \
-  -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
+  -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task1_official:/workspace/yolo26_dataset:ro" \
   -v "$(pwd)/logs:/workspace/logs" \
   -v "$(pwd)/unet:/workspace/unet" \
   -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \
   -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
   unet_ft \
-  bash /workspace/run_pipeline_unet.sh \
-  2>&1 | tee "logs/${PIPELINE_NAME}_$(date -u +%Y%m%dT%H%M%SZ).log"
+  bash /workspace/run_pipeline_unet.sh "$@" \
+  2>&1 | tee "logs/${PIPELINE_NAME}/terminal_$(date -u +%Y%m%dT%H%M%SZ).log"

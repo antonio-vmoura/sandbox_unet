@@ -6,7 +6,7 @@ selected on its held-out fold. Per-fold validation metrics (per-image mean
 DSC, JSI, ISIC thresholded JSI, sensitivity, specificity, accuracy — at the
 256×256 network resolution) are written to CSV and aggregated as mean ±
 **sample** standard deviation (ddof = 1). The DSC/JSI of each fold at the
-640×640 evaluation resolution (same ground truth as YOLO26) are computed by
+dataset resolution evaluation resolution (same ground truth as YOLO26) are computed by
 :mod:`evaluate_cv_pixels`.
 
 Protocols (``--protocol``): ``baseline`` (default, **Phase 2**) = the Phase 1

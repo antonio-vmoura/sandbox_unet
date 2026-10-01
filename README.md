@@ -11,15 +11,16 @@ with the same notebooks.
 
 | Aspect | How it is guaranteed |
 |---|---|
-| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2547/100/994 — same polygon labels). Every sample is addressed by its ISIC ID. |
+| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2,594/100/1,000, the official split — same polygon labels). Every sample is addressed by its ISIC ID. |
 | **Same CV folds** | The CV pool is in YOLO26's order and uses YOLO26's K-Fold algorithm (NumPy `RandomState(0)`, no scikit-learn) → **identical folds** (verified). |
-| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original 640×640 and scored against the ground truth rasterised from the same YOLO labels. |
+| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original dataset resolution and scored against the ground truth rasterised from the same YOLO labels. |
 | **Same profiling** | `benchmark_efficiency.py` is derived from YOLO26's: same `torch.cuda.Event` timing, statistics, steady-state VRAM, contention checks and JSON schema; same PyTorch version. |
 | **Same software stack** | The Docker image pins `torch==2.5.1` / `torchvision==0.20.1` (cu121) like YOLO26, plus `optuna==5.0.0`. |
 
 **Resolution ceiling.** A perfect 256×256 prediction, processed by the U-Net inference pipeline (bilinear
-upsampling to 640×640, threshold 0.5), scores **DSC 0.9967** on the test set (min 0.965) — the maximum
-achievable at the U-Net's input resolution (measured with an oracle model on all 994 test images).
+upsampling to dataset resolution, threshold 0.5), scores **DSC 0.9967** on the test set (min 0.965) — the maximum
+achievable at the U-Net's input resolution (measured with an oracle model on the 994 test images of the earlier
+Roboflow export; **[re-measure on the official 1,000-image test set]**).
 
 ---
 
@@ -29,7 +30,7 @@ achievable at the U-Net's input resolution (measured with an oracle model on all
 |---|---|---|---|
 | **0 — Data cache** | 256×256 arrays from the YOLO26 dataset; strictly binary masks; ID manifests; SHA-256 provenance | train / val / test | `prepare_dataset.py` |
 | **1 — Baseline** | Base setup + **Keras-baseline default** hyperparameters | train / val | `train_baseline_models.py` |
-| **2 — Baseline CV** | 5-fold CV with the Phase 1 configuration; DSC/JSI per fold at 640×640 | train ∪ val pool (**test excluded and verified**) | `train_cv_unet.py`, `consolidate_cv_results_unet.py`, `evaluate_cv_pixels.py` |
+| **2 — Baseline CV** | 5-fold CV with the Phase 1 configuration; DSC/JSI per fold at dataset resolution | train ∪ val pool (**test excluded and verified**) | `train_cv_unet.py`, `consolidate_cv_results_unet.py`, `evaluate_cv_pixels.py` |
 | **3 — HPO** | Optuna TPE, **seeded per proposal**, fault-tolerant and resumable | train / val | `tune_unet.py`, `check_hpo_validity.py` |
 | **4 — Optimised** | Same base setup + Phase 3 hyperparameters | train / val | `train_optimized_unet.py` |
 | **5 — Test set** | Baseline **and** Optimised: DSC, JSI, ISIC thresholded JSI, sensitivity, specificity (FP32 + FP16); batch-1 efficiency (FP32 + FP16); final report | **test** (only here) | `evaluate_test_set.py`, `benchmark_efficiency.py`, `build_final_report.py` |
@@ -47,7 +48,7 @@ base setup is identical in every phase and can never be overridden by a tuned fi
 | Optimiser / schedule | AdamW (decoupled weight decay ≡ Keras `Adam(weight_decay)`), eps 1e-7, β2 0.999, constant LR |
 | Loss | BCE + soft Dice (original Keras `bce_dice_loss`) |
 | Input / batch | 256×256, batch 16 |
-| Budget | 120 epochs, early-stopping patience 25 on validation JSI (HPO trials: 30 / 10) |
+| Budget | 120 epochs, no early stopping (patience 120; HPO trials: 30 epochs, patience 30); `best.pt` = best validation JSI |
 | Numerics | FP32 (`amp=False`), seed 0, deterministic algorithms |
 
 | Tuned (Phase 3) | Default (Baseline) | Search range |
@@ -92,6 +93,25 @@ count matches exactly.
 
 ---
 
+## ISIC 2018 Task 2 (lesion attributes) — Phase 0
+
+`prepare_dataset.py --task 2` builds a **multi-label** cache from the Task 2 YOLO26 dataset (built first with
+YOLO26's `prepare_dataset.py --task 2`; mount it at `/workspace/yolo26_dataset_task2`): `masks.npy` has shape
+N × 256 × 256 × **5**, one independent binary channel per attribute (`pigment_network`, `negative_network`,
+`streaks`, `milia_like_cyst`, `globules`) — attributes may overlap, so the channels are not mutually exclusive.
+Output: `datasets/isic_2018_task2_unet256`; same 2,594 / 100 / 1,000 images asserted.
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -v "$(pwd)/datasets:/workspace/datasets" -v "$(pwd)/unet:/workspace/unet" \
+    -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task2_official:/workspace/yolo26_dataset_task2:ro" \
+    -w /workspace/unet --entrypoint python unet_ft prepare_dataset.py --task 2
+```
+
+`--task 1` is the default everywhere (the orchestrator and `wait_gpu_unet.sh` run Task 1); **Phases 1–5 currently
+implement Task 1 only** (a 5-channel output head with per-channel sigmoid and per-attribute metrics are needed for
+Task 2).
+
 ## Running the pipeline
 
 ### Build the image
@@ -106,23 +126,27 @@ docker build -t unet_ft .
 GPU=1                                  # host GPU index
 PIPELINE_NAME="pipeline_final_v1"
 
+mkdir -p "logs/${PIPELINE_NAME}"     # the terminal log goes inside the pipeline folder
 docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     --user "$(id -u):$(id -g)" \
     -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
     -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
+    -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
     -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
+    -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task1_official:/workspace/yolo26_dataset:ro" \
     -v "$(pwd)/logs:/workspace/logs" \
     -v "$(pwd)/unet:/workspace/unet" \
     -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \
     -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
     unet_ft \
     bash /workspace/run_pipeline_unet.sh \
-    2>&1 | tee "logs/${PIPELINE_NAME}_$(date -u +%Y%m%dT%H%M%SZ).log"
+    2>&1 | tee "logs/${PIPELINE_NAME}/terminal_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-* The YOLO26 dataset is mounted **read-only** (it is the source of truth); the Phase 0 cache is written to
-  `datasets/isic_2018_task1_unet256/`.
+* The YOLO26 dataset is mounted **read-only** (it is the source of truth) at `/workspace/yolo26_dataset`, a
+  sibling of the `datasets` mount — never inside it: a mount nested in a bind mount makes Docker create an
+  empty, root-owned mount-point folder on the host (`datasets/isic_2018_task1_yolo26/`; delete it with
+  `sudo rmdir` if an older command created it). The Phase 0 cache is written to `datasets/isic_2018_task1_unet256/`.
 * Inside the container the selected GPU is index `0` (hence `GPU_DEVICE=0`).
 * If the run is interrupted for any reason, **run the same command again** — it resumes.
 
@@ -138,7 +162,7 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
 ```
 
 Environment overrides (defaults): `CV_K_FOLDS=5`, `CV_SEED=0`, `HPO_ITERATIONS=30`, `HPO_EPOCHS_PER_TRIAL=30`,
-`HPO_PATIENCE=10`, `HPO_MAX_RETRIES=5`, `HPO_RETRY_WAIT=600`, `EVAL_PRECISIONS="fp32 fp16"`, `YOLO_DATA_YAML`,
+`HPO_PATIENCE=30`, `HPO_MAX_RETRIES=5`, `HPO_RETRY_WAIT=600`, `EVAL_PRECISIONS="fp32 fp16"`, `YOLO_DATA_YAML`,
 `CACHE_DIR`, `LOGS_ROOT`, `PROJECT`.
 
 Exit codes: `0` success · `75` the HPO gave up after repeated GPU failures (fix the driver and re-run to
@@ -155,7 +179,7 @@ GPU_DEVICE=1 ./wait_gpu_unet.sh     # polls nvidia-smi, then launches the docker
 ## Phase 5 — what exactly is measured
 
 **Accuracy (`evaluate_test_set.py`)** — test split only, batch 1, FP32 (primary) and FP16. The 256×256
-probability map is upsampled bilinearly to 640×640 and thresholded at 0.5; per image: DSC, JSI, ISIC
+probability map is upsampled bilinearly to dataset resolution and thresholded at 0.5; per image: DSC, JSI, ISIC
 thresholded JSI (`JSI < 0.65 → 0`), sensitivity, specificity, accuracy (empty prediction → 0, never skipped).
 Same aggregates and JSON/CSV schema as YOLO26; YOLO26's Ultralytics-only instance metrics (box/mask mAP, P, R,
 F1) are present as `NaN`.
@@ -216,7 +240,7 @@ sandbox_unet/
 ├── notebooks/
 │   ├── 01_Segmentation_Visualizer.ipynb
 │   └── 02_Metrics_and_Efficiency_Analysis.ipynb
-├── utils/                     # earlier notebooks
+├── notebooks/legacy/          # earlier notebooks, incl. the original Keras U-Net (kept as a backup)
 └── datasets/  logs/           # not versioned
 ```
 
@@ -226,13 +250,13 @@ Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outp
 `01_Segmentation_Visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
 `02_Metrics_and_Efficiency_Analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
 FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables). The YOLO26 dataset is located
-automatically (Docker mount, `datasets/`, or `../sandbox_yolo26/datasets/`).
+automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
+sibling repository is visible).
 
 ```bash
 docker run --rm -it -p 8888:8888 --user "$(id -u):$(id -g)" -e HOME=/workspace/cache \
-    -v "$(pwd):/workspace" \
-    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
-    unet_ft jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --notebook-dir=/workspace
+    -v "$(pwd)/..:/projects" -w /projects/sandbox_unet \
+    unet_ft jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --notebook-dir=/projects/sandbox_unet
 ```
 
 ---

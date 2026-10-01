@@ -2,7 +2,7 @@
 
 Each fold's ``best.pt`` is scored on that fold's held-out images with the
 same pixel metrics, ground truth and resolution as YOLO26's Phase 2 pixel step
-(:mod:`inference`: 640 × 640, labels rasterised from the YOLO polygons), so
+(:mod:`inference`: dataset resolution, labels rasterised from the YOLO polygons), so
 the CV DSC/JSI of both architectures are directly comparable — they are even
 computed on identical folds. The test set is never used here.
 
@@ -110,7 +110,7 @@ def evaluate_model(model_name: str, args, device, cache: CacheData, paths: Pipel
         summary[key] = {"mean": statistics.mean(vals), "std": statistics.stdev(vals) if len(vals) > 1 else 0.0}
     atomic_write_json(out_json, {
         "model": model_name, "protocol": args.protocol, "split": "cv_heldout_fold",
-        "resolution": "original (YOLO export, 640x640)", "n_folds": len(per_fold), "std_ddof": 1,
+        "resolution": "original (YOLO export, dataset resolution)", "n_folds": len(per_fold), "std_ddof": 1,
         "conf": PROB_THRESHOLD, "per_fold": per_fold, "summary": summary,
         "settings_hash": config_hash(settings), "created_at": utc_now_iso(),
     })

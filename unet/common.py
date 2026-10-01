@@ -57,7 +57,7 @@ DEFAULT_ORDER: list[str] = ["unet"]
 
 #: YOLO-format dataset — the single source of truth shared with YOLO26
 #: (identical images, splits and polygon labels).
-DEFAULT_YOLO_DATA_YAML: str = "/workspace/datasets/isic_2018_task1_yolo26/data.yaml"
+DEFAULT_YOLO_DATA_YAML: str = "/workspace/yolo26_dataset/data.yaml"
 
 #: Phase 0 output: 256×256 cached arrays + ID manifests.
 DEFAULT_CACHE_DIR: str = "/workspace/datasets/isic_2018_task1_unet256"
@@ -68,9 +68,17 @@ DEFAULT_PIPELINE_ROOT: str = "/workspace/logs/pipeline_final_v1"
 #: Global seed for every RNG in the pipeline.
 SEED: int = 0
 
-#: Training budget shared by Phases 1, 2 and 4 (identical to YOLO26).
+#: Training budget shared by Phases 1, 2 and 4 (identical to YOLO26). Patience =
+#: epochs, i.e. no early stopping: with patience 25 on the 100-image validation
+#: split, the Baseline and Optimised runs both stopped at epoch 81 while the CV
+#: folds (530 validation images) kept improving to epochs 96-118.
 TRAIN_EPOCHS: int = 120
-TRAIN_PATIENCE: int = 25
+TRAIN_PATIENCE: int = 120
+
+#: Phase 3 per-trial budget (patience = epochs: every trial runs its 30 epochs;
+#: 10 of 30 trials stopped early with patience 10).
+HPO_EPOCHS: int = 30
+HPO_PATIENCE: int = 30
 
 #: Network input size (images and masks are cached at this size in Phase 0).
 IMGSZ: int = 256
