@@ -42,17 +42,20 @@ EVAL_VERSION: int = 1
 #: Probability threshold of the binary prediction.
 PROB_THRESHOLD: float = 0.5
 
-#: Container location of the YOLO dataset (fallback for the data root).
-DEFAULT_YOLO_ROOT: str = "/workspace/datasets/isic_2018_task1_yolo26"
+#: Container locations of the YOLO dataset (fallbacks for the data root): the
+#: mount used by the README / wait_gpu_unet.sh, then the former nested mount.
+DEFAULT_YOLO_ROOTS: tuple[str, ...] = ("/workspace/yolo26_dataset", "/workspace/datasets/isic_2018_task1_yolo26")
 
 
 def resolve_data_root(cache: CacheData, override: str | None = None) -> Path:
     """Root of the YOLO dataset holding the original images and labels.
 
-    Order: explicit override → the root recorded by Phase 0 → the Docker mount.
+    Order: explicit override → the root recorded by Phase 0 → the Docker mounts.
+    Empty folders are skipped (an older nested ``docker run -v`` left an empty
+    mount-point folder at the former location).
     """
-    for cand in (override, cache.meta.get("source_root"), DEFAULT_YOLO_ROOT):
-        if cand and Path(cand).is_dir():
+    for cand in (override, cache.meta.get("source_root"), *DEFAULT_YOLO_ROOTS):
+        if cand and Path(cand).is_dir() and any(Path(cand).iterdir()):
             return Path(cand)
     raise FileNotFoundError("YOLO dataset root not found; pass --data-root")
 

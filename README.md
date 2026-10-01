@@ -110,8 +110,9 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     --user "$(id -u):$(id -g)" \
     -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
     -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
+    -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
     -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
+    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/yolo26_dataset:ro" \
     -v "$(pwd)/logs:/workspace/logs" \
     -v "$(pwd)/unet:/workspace/unet" \
     -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \
@@ -121,8 +122,10 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     2>&1 | tee "logs/${PIPELINE_NAME}_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-* The YOLO26 dataset is mounted **read-only** (it is the source of truth); the Phase 0 cache is written to
-  `datasets/isic_2018_task1_unet256/`.
+* The YOLO26 dataset is mounted **read-only** (it is the source of truth) at `/workspace/yolo26_dataset`, a
+  sibling of the `datasets` mount — never inside it: a mount nested in a bind mount makes Docker create an
+  empty, root-owned mount-point folder on the host (`datasets/isic_2018_task1_yolo26/`; delete it with
+  `sudo rmdir` if an older command created it). The Phase 0 cache is written to `datasets/isic_2018_task1_unet256/`.
 * Inside the container the selected GPU is index `0` (hence `GPU_DEVICE=0`).
 * If the run is interrupted for any reason, **run the same command again** — it resumes.
 
@@ -226,13 +229,13 @@ Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outp
 `01_Segmentation_Visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
 `02_Metrics_and_Efficiency_Analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
 FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables). The YOLO26 dataset is located
-automatically (Docker mount, `datasets/`, or `../sandbox_yolo26/datasets/`).
+automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
+sibling repository is visible).
 
 ```bash
 docker run --rm -it -p 8888:8888 --user "$(id -u):$(id -g)" -e HOME=/workspace/cache \
-    -v "$(pwd):/workspace" \
-    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
-    unet_ft jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --notebook-dir=/workspace
+    -v "$(pwd)/..:/projects" -w /projects/sandbox_unet \
+    unet_ft jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --notebook-dir=/projects/sandbox_unet
 ```
 
 ---

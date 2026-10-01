@@ -98,7 +98,9 @@ def resolve_split(data_yaml: Path, key: str) -> tuple[Path, list[Path]]:
     root = Path(data.get("path", data_yaml.parent))
     if not root.is_absolute():
         root = (data_yaml.parent / root).resolve()
-    if not root.is_dir():  # e.g. a /workspace/... container path used on the host
+    if not root.is_dir() or not any(root.iterdir()):
+        # e.g. a /workspace/... container path used on the host, or the empty mount-point
+        # folder an older nested ``docker run -v`` left behind
         root = data_yaml.parent
     value = data.get(key)
     if value is None:
