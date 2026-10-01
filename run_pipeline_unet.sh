@@ -1,186 +1,375 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline_unet.sh — Orquestrador para o fine-tuning da U-Net 
-# no dataset ISIC 2018 Task 1 (Arrays Numpy).
-# Inclui Fases 1 (Baseline), 2 (HPO), 3 (Optimized) e 4 (5-Fold CV).
+# run_pipeline_unet.sh — Master orchestrator for the U-Net study on the
+# ISIC 2018 Task 1 dataset (PyTorch; 5-phase protocol mirrored from YOLO26).
+#
+#   Phase 0 — Data cache            (256×256 arrays built from the YOLO26
+#                                    dataset: identical images, splits, labels)
+#   Phase 1 — Baseline training     (base setup + Keras-baseline default HPs)
+#   Phase 2 — Baseline 5-fold CV    (same folds as YOLO26; test isolated;
+#                                    DSC/JSI of each fold at 640×640)
+#   Phase 3 — HPO                   (Optuna TPE, seeded per proposal,
+#                                    resumable; retried on exit code 75)
+#   Phase 4 — Optimised fine-tuning (same base setup + Phase 3 HPs)
+#   Phase 5 — Test set evaluation   (Baseline AND Optimised; same metrics,
+#                                    resolution and profiling as YOLO26)
+#
+# Every phase shares one base setup (U-Net 16 filters, ReLU, BN, AdamW,
+# constant LR, BCE+Dice, batch 16, FP32, seed 0; epochs=120 / patience=25 for
+# Phases 1, 2 and 4), defined once in unet/common.py, so the tuned
+# hyperparameters (learning dynamics + augmentation) are the only variable
+# between Baseline and Optimised.
+#
+# Fault tolerance: every step is idempotent and resumable — re-running the
+# same command continues where it stopped; interrupted trainings resume
+# bit-exactly from last.pt. --force starts the selected phases over (old
+# outputs are moved to *.bak-<UTC>, never deleted).
+#
+# Runs *inside* the ``unet_ft`` Docker container; see README.md for the
+# ``docker run`` invocation (mounts: datasets, logs, unet, and the YOLO26
+# dataset read-only).
 # =============================================================================
 set -euo pipefail
 
-# ---------- Caminhos no HOST (Servidor Físico) -------------------------------
-HOST_LOGS_DIR="$(pwd)/logs"
-PIPELINE_NAME="${PIPELINE_NAME:-pipeline_unet_v4}"
-HOST_PROJECT_DIR="${HOST_LOGS_DIR}/${PIPELINE_NAME}"
+# ---------- Defaults ---------------------------------------------------------
+YOLO_DATA_YAML="${YOLO_DATA_YAML:-/workspace/datasets/isic_2018_task1_yolo26/data.yaml}"
+CACHE_DIR="${CACHE_DIR:-/workspace/datasets/isic_2018_task1_unet256}"
+LOGS_ROOT="${LOGS_ROOT:-/workspace/logs}"
+PIPELINE_NAME="${PIPELINE_NAME:-pipeline_final_v1}"
+if [[ -n "${PROJECT:-}" ]]; then
+    PROJECT_FORCED=1
+else
+    PROJECT_FORCED=0
+fi
+PROJECT="${PROJECT:-${LOGS_ROOT}/${PIPELINE_NAME}}"
+# Single device (the U-Net does not use DDP); "cpu" for smoke tests.
+GPU_DEVICE="${GPU_DEVICE:-0}"
+# Phase 5 benchmark device (default: the training device).
+BENCH_DEVICE="${BENCH_DEVICE:-}"
+MODELS=(unet)
+PHASES=(0 1 2 3 4 5)
+
+# Training budget of Phases 1, 2 and 4 (empty = defaults in common.py:
+# 120 epochs / patience 25). Override ONLY for smoke tests.
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-}"
+TRAIN_PATIENCE="${TRAIN_PATIENCE:-}"
+
+# Phase 2 (CV)
+CV_K_FOLDS="${CV_K_FOLDS:-5}"
+CV_SEED="${CV_SEED:-0}"
+
+# Phase 3 (HPO) — same budget as YOLO26's HPO.
+HPO_ITERATIONS="${HPO_ITERATIONS:-30}"
+HPO_EPOCHS_PER_TRIAL="${HPO_EPOCHS_PER_TRIAL:-30}"
+HPO_PATIENCE="${HPO_PATIENCE:-10}"
+HPO_MAX_RETRIES="${HPO_MAX_RETRIES:-5}"
+HPO_RETRY_WAIT="${HPO_RETRY_WAIT:-600}"
+
+# Phase 5
+EVAL_PRECISIONS="${EVAL_PRECISIONS:-fp32 fp16}"
+
+FORCE_FLAG=""
+DRY_RUN=0
+EXIT_GPU_UNAVAILABLE=75
 
 UNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/unet"
+if [[ -d /workspace/unet ]]; then
+    UNET_DIR=/workspace/unet
+fi
 
-# Criação das pastas de log diretamente na máquina local
+usage() {
+    cat <<EOF
+Usage: $0 [options]
+
+Options:
+  --phases "0 1 2 3 4 5"      Subset of phases to run (default: all).
+  --yolo-data PATH            YOLO26 data.yaml (source of truth). (env: YOLO_DATA_YAML)
+  --cache PATH                Phase 0 cache directory. (env: CACHE_DIR)
+  --logs-root PATH            Parent dir of all pipeline runs. (env: LOGS_ROOT)
+  --pipeline-name NAME        Sub-directory under LOGS_ROOT. (env: PIPELINE_NAME,
+                              default pipeline_final_v1)
+  --project PATH              Explicit root (overrides LOGS_ROOT/PIPELINE_NAME).
+  --device ID                 Single GPU id or "cpu". (env: GPU_DEVICE, default 0)
+  --bench-device ID           GPU for Phase 5. (env: BENCH_DEVICE, default: --device)
+  --epochs INT / --patience INT
+                              Smoke-test budget for Phases 1, 2 AND 4 together.
+  --force                     Start the selected phases over (old outputs → *.bak-<UTC>).
+  --dry-run                   Print the commands without executing them.
+  -h, --help                  Show this help.
+
+Environment: YOLO_DATA_YAML, CACHE_DIR, LOGS_ROOT, PIPELINE_NAME, PROJECT,
+  GPU_DEVICE, BENCH_DEVICE, TRAIN_EPOCHS, TRAIN_PATIENCE, CV_K_FOLDS, CV_SEED,
+  HPO_ITERATIONS, HPO_EPOCHS_PER_TRIAL, HPO_PATIENCE, HPO_MAX_RETRIES,
+  HPO_RETRY_WAIT, EVAL_PRECISIONS
+
+Exit codes: 0 success; 75 HPO gave up after HPO_MAX_RETRIES GPU failures;
+            anything else = exit code of the failing step.
+EOF
+}
+
+PROJECT_EXPLICIT=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --phases) read -r -a PHASES <<<"$2"; shift 2 ;;
+        --yolo-data) YOLO_DATA_YAML="$2"; shift 2 ;;
+        --cache) CACHE_DIR="$2"; shift 2 ;;
+        --logs-root) LOGS_ROOT="$2"; shift 2 ;;
+        --pipeline-name) PIPELINE_NAME="$2"; shift 2 ;;
+        --project) PROJECT="$2"; PROJECT_EXPLICIT=1; shift 2 ;;
+        --device) GPU_DEVICE="$2"; shift 2 ;;
+        --bench-device) BENCH_DEVICE="$2"; shift 2 ;;
+        --epochs) TRAIN_EPOCHS="$2"; shift 2 ;;
+        --patience) TRAIN_PATIENCE="$2"; shift 2 ;;
+        --force) FORCE_FLAG="--force"; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+if [[ "${PROJECT_EXPLICIT}" -eq 0 && "${PROJECT_FORCED}" -eq 0 ]]; then
+    PROJECT="${LOGS_ROOT}/${PIPELINE_NAME}"
+fi
+BENCH_DEVICE="${BENCH_DEVICE:-${GPU_DEVICE}}"
+for dev in "${GPU_DEVICE}" "${BENCH_DEVICE}"; do
+    if [[ "${dev}" == *,* ]]; then
+        echo "[erro] A U-Net usa um único dispositivo (ex.: --device 0), não '${dev}'." >&2
+        exit 2
+    fi
+done
+for p in "${PHASES[@]}"; do
+    if [[ ! "${p}" =~ ^[0-5]$ ]]; then
+        echo "[erro] Fase inválida: '${p}'. Use números de 0 a 5." >&2
+        exit 2
+    fi
+done
+
+BUDGET_ARGS=()
+[[ -n "${TRAIN_EPOCHS}" ]] && BUDGET_ARGS+=(--epochs "${TRAIN_EPOCHS}")
+[[ -n "${TRAIN_PATIENCE}" ]] && BUDGET_ARGS+=(--patience "${TRAIN_PATIENCE}")
+FORCE_ARGS=()
+[[ -n "${FORCE_FLAG}" ]] && FORCE_ARGS+=("${FORCE_FLAG}")
+COMMON_ARGS=(--models "${MODELS[@]}" --cache "${CACHE_DIR}" --project "${PROJECT}")
+
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
-PIPELINE_LOG_DIR="${HOST_PROJECT_DIR}/pipeline_runs/${RUN_TS}"
+PIPELINE_LOG_DIR="${PROJECT}/pipeline_runs/${RUN_TS}"
 mkdir -p "${PIPELINE_LOG_DIR}"
-PIPELINE_LOG="${PIPELINE_LOG_DIR}/pipeline_unet.log"
-
-# ---------- Caminhos no CONTAINER (Mapeamento interno do Docker) -------------
-DATA_DIR_CONTAINER="/workspace/datasets/isic_2018_task1_numpy"
-PROJECT_CONTAINER="/workspace/logs/${PIPELINE_NAME}"
-
-# Configuração da GPU
-GPU_DEVICE_IDS="${GPU_DEVICE_IDS:-1}"
-
-# Parâmetros HPO (Fase 2)
-HPO_ITERATIONS="${HPO_ITERATIONS:-30}"
-HPO_EPOCHS="${HPO_EPOCHS:-30}"
-HPO_PATIENCE="${HPO_PATIENCE:-10}"
-HPO_PROJECT_CONTAINER="${PROJECT_CONTAINER}/hpo"
-
-# Parâmetros CV (Fase 4)
-CV_K_FOLDS="${CV_K_FOLDS:-5}"
+PIPELINE_LOG="${PIPELINE_LOG_DIR}/pipeline.log"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*" | tee -a "${PIPELINE_LOG}"; }
 
+# ---------- GPU sanity check -------------------------------------------------
+# Verifica, em <1 s, se o driver NVIDIA e o torch.cuda estão saudáveis antes
+# de cada fase (falhar cedo em vez de minutos dentro do treino). Pulada em
+# --dry-run e quando o dispositivo é "cpu".
+gpu_sanity_check() {
+    local tag="$1" dev="${2:-${GPU_DEVICE}}"
+    if [[ "${DRY_RUN}" -eq 1 || "${dev}" == "cpu" ]]; then
+        log "    [gpu_sanity_check:${tag}] pulado (${dev}; dry-run=${DRY_RUN})"
+        return 0
+    fi
+    log "    [gpu_sanity_check:${tag}] verificando driver NVIDIA e torch.cuda..."
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log "    [gpu_sanity_check:${tag}] FALHOU — 'nvidia-smi' não está no PATH dentro do container."
+        return 10
+    fi
+    if ! nvidia-smi -L >/dev/null 2>&1; then
+        log "    [gpu_sanity_check:${tag}] FALHOU — 'nvidia-smi -L' não retornou GPUs (driver caiu?)."
+        return 11
+    fi
+    if ! python - <<'PY' >/dev/null 2>&1
+import sys
+import torch
+sys.exit(0 if (torch.cuda.is_available() and torch.cuda.device_count() > 0) else 1)
+PY
+    then
+        log "    [gpu_sanity_check:${tag}] FALHOU — torch.cuda.is_available() retornou False."
+        return 12
+    fi
+    log "    [gpu_sanity_check:${tag}] OK — $(nvidia-smi -L | wc -l) GPU(s) visíveis."
+    return 0
+}
+
+run_cmd() {
+    local phase_tag="$1"; shift
+    local phase_log="${PIPELINE_LOG_DIR}/${phase_tag}.log"
+    log ">>> [${phase_tag}] $*"
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        log "    (dry-run — skipping execution)"
+        return 0
+    fi
+    set +e
+    "$@" 2>&1 | tee -a "${phase_log}" | tee -a "${PIPELINE_LOG}"
+    local rc=${PIPESTATUS[0]}
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        log "<<< [${phase_tag}] FAILED with exit code ${rc}"
+        return "${rc}"
+    fi
+    log "<<< [${phase_tag}] OK"
+    return 0
+}
+
+run_or_die() {
+    local rc=0
+    run_cmd "$@" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "Pipeline aborted at step '$1' (exit ${rc}). Fix the cause and re-run the same command to resume."
+        exit "${rc}"
+    fi
+}
+
+has_phase() {
+    local needle="$1"
+    for p in "${PHASES[@]}"; do
+        [[ "${p}" == "${needle}" ]] && return 0
+    done
+    return 1
+}
+
+require_complete_run() {
+    local run_dir="$1" label="$2"
+    [[ "${DRY_RUN}" -eq 1 ]] && return 0
+    if ! grep -q '"status": "complete"' "${run_dir}/run_state.json" 2>/dev/null; then
+        log "[erro] ${label}: run incompleto ou ausente em ${run_dir} — execute a fase correspondente antes."
+        exit 3
+    fi
+}
+
+require_script() {
+    if [[ ! -f "${UNET_DIR}/$1" ]]; then
+        log "[erro] ${UNET_DIR}/$1 não existe (ainda não implementado)."
+        exit 4
+    fi
+}
+
 log "=============================================================="
-log "U-Net ISIC 2018 Task 1 — End-to-End Pipeline (Fases 1 a 4)"
+log "U-Net (PyTorch) ISIC 2018 Task 1 — 5-Phase Pipeline"
 log "=============================================================="
-log "  Host Logs Dir  = ${HOST_LOGS_DIR}"
-log "  Container Data = ${DATA_DIR_CONTAINER}"
-log "  device         = ${GPU_DEVICE_IDS}"
-log "  pipeline_log   = ${PIPELINE_LOG}"
+log "  yolo data      = ${YOLO_DATA_YAML}"
+log "  cache          = ${CACHE_DIR}"
+log "  project        = ${PROJECT}"
+log "  device         = ${GPU_DEVICE}   (Phase 5 bench device = ${BENCH_DEVICE})"
+log "  phases         = ${PHASES[*]}"
+log "  train budget   = ${TRAIN_EPOCHS:-120 (default)} epochs, patience ${TRAIN_PATIENCE:-25 (default)}  [Phases 1, 2, 4]"
+log "  cv             = k=${CV_K_FOLDS}, seed=${CV_SEED}"
+log "  hpo            = Optuna TPE, trials=${HPO_ITERATIONS}, ep/trial=${HPO_EPOCHS_PER_TRIAL}, retries=${HPO_MAX_RETRIES} x ${HPO_RETRY_WAIT}s"
+log "  precisions     = ${EVAL_PRECISIONS}  [Phase 5]"
+log "  force          = ${FORCE_FLAG:-<off>}"
+log "  unet_dir       = ${UNET_DIR}"
+if [[ -n "${TRAIN_EPOCHS}${TRAIN_PATIENCE}" ]]; then
+    log "  [aviso] orçamento de treino diferente do protocolo (120/25) — use apenas para smoke tests."
+fi
 log "--------------------------------------------------------------"
 
-# =============================================================================
-# FASE 1: Baseline
-# =============================================================================
-log "### Fase 1 — Iniciando Baseline..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
-    -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    -v /etc/passwd:/etc/passwd:ro \
-    -v /etc/group:/etc/group:ro \
-    unet_ft \
-    python /workspace/unet/train_baseline_models.py \
-        --data_dir "${DATA_DIR_CONTAINER}" \
-        --project "${PROJECT_CONTAINER}" \
-        --epochs 120 \
-        --patience 20 \
-        --batch 16 \
-        --seed 0 \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 0 — Data cache ---------------------------------------------
+if has_phase 0; then
+    log ""
+    log "### Phase 0 — U-Net data cache from the YOLO26 dataset (idempotent)"
+    run_or_die phase0 python "${UNET_DIR}/prepare_dataset.py" \
+        --yolo-data "${YOLO_DATA_YAML}" --out "${CACHE_DIR}" "${FORCE_ARGS[@]}"
+fi
 
-# Recolha de Métricas da Fase 1
-log "### Fase 1 — Coletando métricas do baseline..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    unet_ft \
-    python /workspace/unet/collect_phase_metrics_unet.py \
-        --phase baseline \
-        --project "${PROJECT_CONTAINER}" \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 1 — Baseline training -------------------------------------
+if has_phase 1; then
+    log ""
+    log "### Phase 1 — Baseline training (base setup + Keras-baseline default HPs)"
+    gpu_sanity_check phase1 || exit $?
+    run_or_die phase1 python "${UNET_DIR}/train_baseline_models.py" \
+        "${COMMON_ARGS[@]}" --device "${GPU_DEVICE}" "${BUDGET_ARGS[@]}" "${FORCE_ARGS[@]}"
+    run_or_die phase1_collect python "${UNET_DIR}/collect_phase_metrics_unet.py" \
+        --phase phase1 --models "${MODELS[@]}" --project "${PROJECT}"
+fi
 
-# =============================================================================
-# FASE 2: Hyperparameter Optimization (Optuna)
-# =============================================================================
-log "### Fase 2 — Iniciando HPO (Optuna)..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
-    -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    -v /etc/passwd:/etc/passwd:ro \
-    -v /etc/group:/etc/group:ro \
-    unet_ft \
-    python /workspace/unet/tune_unet.py \
-        --data_dir "${DATA_DIR_CONTAINER}" \
-        --project "${HPO_PROJECT_CONTAINER}" \
-        --iterations ${HPO_ITERATIONS} \
-        --epochs ${HPO_EPOCHS} \
-        --patience ${HPO_PATIENCE} \
-        --batch 16 \
-        --seed 0 \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 2 — Baseline cross-validation -----------------------------
+if has_phase 2; then
+    log ""
+    log "### Phase 2 — Baseline ${CV_K_FOLDS}-fold CV on train+val (seed=${CV_SEED}; same folds as YOLO26; test isolated)"
+    gpu_sanity_check phase2 || exit $?
+    run_or_die phase2 python "${UNET_DIR}/train_cv_unet.py" \
+        --protocol baseline "${COMMON_ARGS[@]}" --device "${GPU_DEVICE}" \
+        --k-folds "${CV_K_FOLDS}" --seed "${CV_SEED}" "${BUDGET_ARGS[@]}" "${FORCE_ARGS[@]}"
+    run_or_die phase2_consolidate python "${UNET_DIR}/consolidate_cv_results_unet.py" \
+        --protocol baseline --models "${MODELS[@]}" --project "${PROJECT}"
+    log "### Phase 2 — DSC/JSI of each fold on its held-out fold at 640×640 (device ${BENCH_DEVICE})"
+    run_or_die phase2_pixels python "${UNET_DIR}/evaluate_cv_pixels.py" \
+        --protocol baseline "${COMMON_ARGS[@]}" --device "${BENCH_DEVICE}" "${FORCE_ARGS[@]}"
+fi
 
-# =============================================================================
-# FASE 3: Treino Otimizado (Single-split)
-# =============================================================================
-log "### Fase 3 — Iniciando Treino Otimizado (usa best_hyperparameters.yaml)..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
-    -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    -v /etc/passwd:/etc/passwd:ro \
-    -v /etc/group:/etc/group:ro \
-    unet_ft \
-    python /workspace/unet/train_optimized_unet.py \
-        --data_dir "${DATA_DIR_CONTAINER}" \
-        --project "${PROJECT_CONTAINER}" \
-        --hpo_dir "${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet" \
-        --epochs 120 \
-        --patience 25 \
-        --batch 16 \
-        --seed 0 \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 3 — HPO (fault-tolerant, retried on exit 75) --------------
+if has_phase 3; then
+    log ""
+    log "### Phase 3 — HPO (Optuna TPE, ${HPO_ITERATIONS} trials x ${HPO_EPOCHS_PER_TRIAL} ep, seeded, resumable)"
+    HPO_FORCE_ARGS=("${FORCE_ARGS[@]}")
+    max_attempts=$((HPO_MAX_RETRIES + 1))
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        rc=0
+        if ! gpu_sanity_check "phase3#${attempt}"; then
+            rc=${EXIT_GPU_UNAVAILABLE}
+        else
+            run_cmd phase3 python "${UNET_DIR}/tune_unet.py" \
+                "${COMMON_ARGS[@]}" --device "${GPU_DEVICE}" \
+                --iterations "${HPO_ITERATIONS}" \
+                --epochs "${HPO_EPOCHS_PER_TRIAL}" \
+                --patience "${HPO_PATIENCE}" \
+                "${HPO_FORCE_ARGS[@]}" || rc=$?
+        fi
+        HPO_FORCE_ARGS=()   # --force only on the first attempt; retries resume
+        if [[ ${rc} -eq 0 ]]; then
+            break
+        fi
+        if [[ ${rc} -ne ${EXIT_GPU_UNAVAILABLE} ]]; then
+            log "Pipeline aborted at step 'phase3' (exit ${rc}, not a GPU failure). Fix the cause and re-run to resume."
+            exit "${rc}"
+        fi
+        if [[ ${attempt} -ge ${max_attempts} ]]; then
+            log "[erro] Phase 3: GPU indisponível após ${max_attempts} tentativa(s). Recupere o driver e re-execute — a busca continua do último trial."
+            exit "${EXIT_GPU_UNAVAILABLE}"
+        fi
+        log "    [phase3] GPU indisponível (exit ${rc}) — tentativa ${attempt}/${max_attempts}; nova tentativa em ${HPO_RETRY_WAIT}s (retoma do último trial)."
+        [[ "${DRY_RUN}" -eq 1 ]] || sleep "${HPO_RETRY_WAIT}"
+    done
+    log "### Phase 3 — Validating HPO outputs (completeness + degenerate trials)"
+    run_or_die phase3_validate python "${UNET_DIR}/check_hpo_validity.py" \
+        --project "${PROJECT}" --models "${MODELS[@]}" --iterations "${HPO_ITERATIONS}"
+fi
 
-# Recolha de Métricas da Fase 3
-log "### Fase 3 — Coletando métricas otimizadas para pipeline_summary/..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    unet_ft \
-    python /workspace/unet/collect_phase_metrics_unet.py \
-        --phase optimized \
-        --project "${PROJECT_CONTAINER}" \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 4 — Optimised fine-tuning ---------------------------------
+if has_phase 4; then
+    log ""
+    log "### Phase 4 — Optimised fine-tuning with the Phase 3 hyperparameters"
+    gpu_sanity_check phase4 || exit $?
+    run_or_die phase4 python "${UNET_DIR}/train_optimized_unet.py" \
+        "${COMMON_ARGS[@]}" --device "${GPU_DEVICE}" "${BUDGET_ARGS[@]}" "${FORCE_ARGS[@]}"
+    run_or_die phase4_collect python "${UNET_DIR}/collect_phase_metrics_unet.py" \
+        --phase phase4 --models "${MODELS[@]}" --project "${PROJECT}"
+fi
 
-# =============================================================================
-# FASE 4: 5-Fold Cross-Validation
-# =============================================================================
-log "### Fase 4 — Iniciando ${CV_K_FOLDS}-Fold CV..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -e TF_FORCE_GPU_ALLOW_GROWTH=true \
-    -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    -v /etc/passwd:/etc/passwd:ro \
-    -v /etc/group:/etc/group:ro \
-    unet_ft \
-    python /workspace/unet/train_cv_unet.py \
-        --data_dir "${DATA_DIR_CONTAINER}" \
-        --project "${PROJECT_CONTAINER}" \
-        --hpo_dir "${HPO_PROJECT_CONTAINER}/hpo_v3/tune_isic_2018_task_1_unet" \
-        --k_folds ${CV_K_FOLDS} \
-        --epochs 120 \
-        --patience 25 \
-        --batch 16 \
-        --seed 0 \
-    2>&1 | tee -a "${PIPELINE_LOG}"
+# ---------- Phase 5 — Test set inference & profiling ------------------------
+if has_phase 5; then
+    log ""
+    log "### Phase 5 — Test set evaluation of Baseline AND Optimised (device ${BENCH_DEVICE})"
+    for script in evaluate_test_set.py benchmark_efficiency.py build_final_report.py; do
+        require_script "${script}"
+    done
+    for m in "${MODELS[@]}"; do
+        require_complete_run "${PROJECT}/phase1_baseline/${m}_baseline" "Baseline ${m}"
+        require_complete_run "${PROJECT}/phase4_optimized/${m}_optimized" "Optimised ${m}"
+    done
+    gpu_sanity_check phase5 "${BENCH_DEVICE}" || exit $?
+    read -r -a PRECISIONS <<<"${EVAL_PRECISIONS}"
+    run_or_die phase5_accuracy python "${UNET_DIR}/evaluate_test_set.py" \
+        "${COMMON_ARGS[@]}" --variants baseline optimized --precisions "${PRECISIONS[@]}" \
+        --device "${BENCH_DEVICE}" "${FORCE_ARGS[@]}"
+    run_or_die phase5_efficiency python "${UNET_DIR}/benchmark_efficiency.py" \
+        "${COMMON_ARGS[@]}" --variants baseline optimized --precisions "${PRECISIONS[@]}" \
+        --device "${BENCH_DEVICE}" "${FORCE_ARGS[@]}"
+    run_or_die phase5_report python "${UNET_DIR}/build_final_report.py" \
+        --models "${MODELS[@]}" --project "${PROJECT}"
+fi
 
-# Consolidação da Fase 4
-log "### Fase 4 — Consolidando resultados do CV..."
-docker run --gpus "\"device=${GPU_DEVICE_IDS}\"" --rm \
-    --ipc=host \
-    --user "$(id -u):$(id -g)" \
-    -v "$(pwd)/logs:/workspace/logs" \
-    -v "${UNET_DIR}:/workspace/unet" \
-    unet_ft \
-    python /workspace/unet/consolidate_cv_results_unet.py \
-        --project "${PROJECT_CONTAINER}" \
-        --k_folds ${CV_K_FOLDS} \
-    2>&1 | tee -a "${PIPELINE_LOG}"
-
+log ""
 log "=============================================================="
-log "Pipeline U-Net (Fases 1 a 4) finalizado."
+log "Pipeline finished. Per-phase logs: ${PIPELINE_LOG_DIR}/"
+log "Consolidated artefacts: ${PROJECT}/summary/"
 log "=============================================================="

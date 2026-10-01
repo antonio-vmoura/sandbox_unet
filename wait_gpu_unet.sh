@@ -1,38 +1,59 @@
 #!/bin/bash
 # =============================================================================
-# wait_gpu_unet.sh — Aguarda a GPU 0 ficar ociosa para lançar o pipeline U-Net.
+# wait_gpu_unet.sh — Aguarda a GPU ficar ociosa e então lança o pipeline U-Net
+# (run_pipeline_unet.sh) dentro do container ``unet_ft``.
+#
+# 1. Consulta ``nvidia-smi`` uma vez por minuto na GPU ${GPU_DEVICE}.
+# 2. A GPU é considerada ociosa quando memory.used < 1000 MiB E
+#    utilization.gpu < 10%.
+# 3. Após ``REQUIRED_IDLE_MINUTES`` verificações ociosas consecutivas, executa
+#    o bloco ``docker run`` abaixo.
+#
+# O pipeline é retomável: relançar o mesmo comando continua um estudo
+# interrompido em vez de recomeçá-lo.
 # =============================================================================
 
-echo "Aguardando a GPU 0 ficar ociosa por alguns minutos..."
-
+GPU_DEVICE="${GPU_DEVICE:-0}"
+PIPELINE_NAME="${PIPELINE_NAME:-pipeline_final_v1}"
 CHECK_INTERVAL=60
 REQUIRED_IDLE_MINUTES=3
 IDLE_COUNT=0
 
+echo "Aguardando a GPU ${GPU_DEVICE} ficar ociosa por ${REQUIRED_IDLE_MINUTES} minuto(s)..."
+
 while true; do
-    # Verifica memória (MiB) e utilização (%) da GPU 0
-    GPU0_MEM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-    GPU0_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits -i 0)
-
-    # Condição de ociosidade: memória < 1000 MiB E utilização < 10%
-    if [ "$GPU0_MEM" -lt 1000 ] && [ "$GPU0_UTIL" -lt 10 ]; then
+    MEM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "${GPU_DEVICE}")
+    UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits -i "${GPU_DEVICE}")
+    if [ "$MEM" -lt 1000 ] && [ "$UTIL" -lt 10 ]; then
         ((IDLE_COUNT++))
-        echo "$(date) | GPU0: ${GPU0_MEM}MiB ${GPU0_UTIL}% -> ociosa há $IDLE_COUNT minuto(s)."
-
+        echo "$(date) | GPU${GPU_DEVICE}: ${MEM}MiB ${UTIL}% -> ociosa há $IDLE_COUNT minuto(s)."
         if [ "$IDLE_COUNT" -ge "$REQUIRED_IDLE_MINUTES" ]; then
-            echo "GPU liberada! Iniciando o treinamento da U-Net..."
+            echo "GPU liberada — iniciando o pipeline U-Net."
             break
         fi
     else
         if [ "$IDLE_COUNT" -gt 0 ]; then
             echo "$(date) | Atividade detectada — zerando contador de ociosidade."
         else
-            echo "$(date) | GPU0: ${GPU0_MEM}MiB ${GPU0_UTIL}% -> ocupada."
+            echo "$(date) | GPU${GPU_DEVICE}: ${MEM}MiB ${UTIL}% -> ocupada."
         fi
         IDLE_COUNT=0
     fi
     sleep $CHECK_INTERVAL
 done
 
-# Chama o orquestrador que acabamos de criar
-bash run_pipeline_unet.sh
+# O dataset YOLO26 (fonte única de verdade) é montado somente-leitura; o cache
+# 256×256 da Fase 0 é escrito em datasets/isic_2018_task1_unet256.
+docker run --gpus "\"device=${GPU_DEVICE}\"" --rm --ipc=host \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
+  -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
+  -v "$(pwd)/datasets:/workspace/datasets" \
+  -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/datasets/isic_2018_task1_yolo26:ro" \
+  -v "$(pwd)/logs:/workspace/logs" \
+  -v "$(pwd)/unet:/workspace/unet" \
+  -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \
+  -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
+  unet_ft \
+  bash /workspace/run_pipeline_unet.sh \
+  2>&1 | tee "logs/${PIPELINE_NAME}_$(date -u +%Y%m%dT%H%M%SZ).log"

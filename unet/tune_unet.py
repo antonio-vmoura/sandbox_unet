@@ -1,245 +1,379 @@
-"""Phase 2 — Hyperparameter Optimization (HPO) for U-Net using Optuna.
+"""Phase 3 — Fault-tolerant, reproducible HPO of the U-Net with Optuna (TPE).
 
-Otimização de hiperparâmetros blindada com Garbage Collection agressivo.
-Espaço de busca focado na otimização arquitetural profunda (Losses, 
-Ativações, Weight Decay e Otimizadores).
-Inclui Data Augmentation fixa para garantir paridade com YOLO, e correções
-matemáticas nas funções de perda para garantir o fluxo de gradientes.
+The search keeps the framework of the original pipeline (Optuna, TPE sampler,
+SQLite storage) and adds the same guarantees as YOLO26's ``SeededTuner``:
+
+Search space (strict "apples-to-apples")
+    Only the learning dynamics and augmentation are searched
+    (:data:`SEARCH_SPACE`: lr0, weight_decay, beta1, dropout, degrees,
+    translate, scale, fliplr, flipud). Architecture, optimiser type, loss,
+    batch, budget and precision belong to the base setup and cannot be
+    searched. The first trial evaluates the default (Baseline)
+    hyperparameters clipped to the bounds; note that the default
+    ``weight_decay = 0`` lies outside the log-scale range and is clipped to its
+    lower bound 1e-6.
+
+Reproducibility
+    A fresh ``TPESampler`` is installed before every proposal, seeded from
+    ``(seed, i)`` where *i* is the number of completed trials. TPE builds its
+    model only from COMPLETE trials and draws all randomness from that seed,
+    so the proposal for trial *i* is a pure function of (seed, i, history of
+    completed trials). The proposed parameters are recorded and a resumed or
+    retried proposal is **verified** to be identical (else the run stops).
+
+Fault tolerance
+    * ``hpo_state.json`` (same schema as YOLO26) is checkpointed atomically
+      before every trial; completion is ``completed_trials == --iterations``.
+    * Trials left RUNNING by a crash are marked FAIL ("interrupted", not
+      counted as a failure). The same proposal is asked again — it receives
+      identical parameters and the **same trial folder**, so the interrupted
+      training itself resumes bit-exactly from its ``last.pt``.
+    * A trial that raises or returns a non-finite fitness is retried with the
+      same parameters (from a clean folder) up to ``--max-trial-retries``
+      times, then recorded as a completed trial with fitness 0 (as YOLO26).
+      Failures that coincide with an unhealthy GPU are not counted, and the
+      script exits with :data:`EXIT_GPU_UNAVAILABLE` (75) so the orchestrator
+      retries later.
+    * Resuming with a different search space, base setup, seed, data or
+      Optuna/torch version is refused (config hash); a lock prevents two
+      processes from tuning the same model; ``--force`` moves the previous
+      search to ``tune_<model>.bak-<UTC>``.
+
+Fitness: validation per-image mean JSI of the trial's best epoch (the same
+criterion that selects checkpoints in every phase). Trials train on ``train``
+and are scored on ``val``; the test split is never used.
+
+Outputs (per model)::
+
+    <project>/phase3_hpo/tune_<model>/
+    ├── tune_results.csv            # fitness + params per completed trial (YOLO26 format)
+    ├── best_hyperparameters.yaml   # consumed by Phase 4
+    ├── hpo_state.json              # checkpoint
+    ├── optuna_study.db             # Optuna storage (SQLite)
+    └── trials/trial_<i>/           # resumable training run of each trial
+
+Exit codes: 0 complete; 1 a model failed; 75 GPU/driver unavailable.
+
+Usage:
+    python tune_unet.py --project /workspace/logs/pipeline_final_v1 --iterations 30 --epochs 30
 """
 
-import os
+from __future__ import annotations
+
 import argparse
+import math
+import subprocess
+import sys
 import time
-import numpy as np
-import tensorflow as tf
+import traceback
+import warnings
 from pathlib import Path
-import yaml
+from typing import Any
+
 import optuna
-import gc
+import torch
+import yaml
+from optuna.distributions import FloatDistribution
+from optuna.trial import TrialState
 
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam, SGD
-from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPooling2D, Conv2DTranspose, concatenate, Input, Dropout
-from tensorflow.keras import Model
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-import tensorflow.keras.backend as K
+from common import (
+    BASE_SETUP,
+    DEFAULT_CACHE_DIR,
+    DEFAULT_HPS,
+    DEFAULT_ORDER,
+    DEFAULT_PIPELINE_ROOT,
+    PROTECTED_KEYS,
+    SEED,
+    TUNABLE_KEYS,
+    PipelinePaths,
+    atomic_write_json,
+    config_hash,
+    exclusive_lock,
+    hpo_trial_protocol,
+    parse_device,
+    read_json,
+    seed_everything,
+    utc_now_iso,
+)
+from data import CacheData, ids_fingerprint
+from training import backup_dir, train_or_resume
 
-VERSION = "hpo_v3"
-MODEL_NAME = "unet"
-TUNE_PREFIX = "tune_isic_2018_task_1_"
+# PartialFixedSampler (used for the first trial) has been stable since Optuna 2.4.
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
-def set_seeds(seed=0):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+EXIT_GPU_UNAVAILABLE: int = 75
+STATE_SCHEMA: int = 1
 
-# --- MÉTRICAS (Usam Threshold - Apenas para avaliação) ---
-def metric_iou(y_true, y_pred, smooth=1e-6):
-    y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
-    y_true_f = tf.cast(y_true, tf.float32)
-    intersection = K.sum(y_true_f * y_pred_th)
-    union = K.sum(y_true_f) + K.sum(y_pred_th) - intersection
-    return (intersection + smooth) / (union + smooth)
+#: Search space: name → (low, high, log). Learning dynamics + augmentation only.
+SEARCH_SPACE: dict[str, tuple[float, float, bool]] = {
+    "lr0":          (1e-4, 1e-2, True),
+    "weight_decay": (1e-6, 1e-3, True),
+    "beta1":        (0.80, 0.95, False),
+    "dropout":      (0.10, 0.40, False),
+    "degrees":      (0.0, 45.0, False),
+    "translate":    (0.0, 0.20, False),
+    "scale":        (0.0, 0.30, False),
+    "fliplr":       (0.0, 0.50, False),
+    "flipud":       (0.0, 0.50, False),
+}
+assert set(SEARCH_SPACE) <= TUNABLE_KEYS and not set(SEARCH_SPACE) & PROTECTED_KEYS
 
-def metric_dice(y_true, y_pred, smooth=1e-6):
-    y_pred_th = tf.cast(y_pred > 0.5, tf.float32)
-    y_true_f = tf.cast(y_true, tf.float32)
-    intersection = K.sum(y_true_f * y_pred_th)
-    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_th) + smooth)
+#: Random-search trials before TPE modelling starts (Optuna default).
+TPE_STARTUP_TRIALS: int = 10
 
-# --- LOSSES (NÃO usam Threshold - Diferenciáveis para Backpropagation) ---
-def dice_loss(y_true, y_pred, smooth=1e-6):
-    y_true_f = tf.cast(y_true, tf.float32)
-    y_pred_f = tf.cast(y_pred, tf.float32) # Sem threshold > 0.5 aqui!
-    intersection = K.sum(y_true_f * y_pred_f)
-    dice_coeff = (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
-    return 1.0 - dice_coeff
+DISTRIBUTIONS = {k: FloatDistribution(lo, hi, log=log) for k, (lo, hi, log) in SEARCH_SPACE.items()}
 
-def bce_dice_loss(y_true, y_pred):
-    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-    return bce + dice_loss(y_true, y_pred)
 
-# --- Construtor U-Net Modernizado ---
-def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True, activation="relu"):
-    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(input_tensor)
-    if batchnorm: 
-        x = BatchNormalization()(x)
-        
-    if activation == "leaky_relu": x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    elif activation == "swish": x = Activation("swish")(x)
-    else: x = Activation("relu")(x)
-        
-    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal", padding="same")(x)
-    if batchnorm: 
-        x = BatchNormalization()(x)
-        
-    if activation == "leaky_relu": x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    elif activation == "swish": x = Activation("swish")(x)
-    else: x = Activation("relu")(x)
-    return x
+class GPUUnavailable(RuntimeError):
+    """GPU/driver unhealthy; maps to :data:`EXIT_GPU_UNAVAILABLE`."""
 
-def get_unet(input_img, n_filters, dropout, batchnorm, activation):
-    c1 = conv2d_block(input_img, n_filters=n_filters*1, batchnorm=batchnorm, activation=activation)
-    p1 = Dropout(dropout)(MaxPooling2D((2, 2))(c1))
-    c2 = conv2d_block(p1, n_filters=n_filters*2, batchnorm=batchnorm, activation=activation)
-    p2 = Dropout(dropout)(MaxPooling2D((2, 2))(c2))
-    c3 = conv2d_block(p2, n_filters=n_filters*4, batchnorm=batchnorm, activation=activation)
-    p3 = Dropout(dropout)(MaxPooling2D((2, 2))(c3))
-    c4 = conv2d_block(p3, n_filters=n_filters*8, batchnorm=batchnorm, activation=activation)
-    p4 = Dropout(dropout)(MaxPooling2D(pool_size=(2, 2))(c4))
-    c5 = conv2d_block(p4, n_filters=n_filters*16, batchnorm=batchnorm, activation=activation)
-    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same')(c5)
-    c6 = conv2d_block(Dropout(dropout)(concatenate([u6, c4])), n_filters=n_filters*8, batchnorm=batchnorm, activation=activation)
-    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same')(c6)
-    c7 = conv2d_block(Dropout(dropout)(concatenate([u7, c3])), n_filters=n_filters*4, batchnorm=batchnorm, activation=activation)
-    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same')(c7)
-    c8 = conv2d_block(Dropout(dropout)(concatenate([u8, c2])), n_filters=n_filters*2, batchnorm=batchnorm, activation=activation)
-    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same')(c8)
-    c9 = conv2d_block(Dropout(dropout)(concatenate([u9, c1], axis=3)), n_filters=n_filters*1, batchnorm=batchnorm, activation=activation)
-    outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
-    return Model(inputs=[input_img], outputs=[outputs])
 
-def create_objective(args, x_train, y_train, x_val, y_val):
-    def objective(trial):
-        K.clear_session()
-        gc.collect() 
-        
-        # --- Espaço de Busca (Focado na Arquitetura e Gradientes) ---
-        lr = trial.suggest_float("lr0", 1e-4, 1e-2, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-        dropout = trial.suggest_float("dropout", 0.1, 0.4)
-        n_filters = trial.suggest_categorical("n_filters", [16, 32])
-        activation = trial.suggest_categorical("activation", ["relu", "leaky_relu", "swish"])
-        optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD_Momentum"])
-        loss_type = trial.suggest_categorical("loss_type", ["bce", "dice", "bce_dice"])
-        
-        # --- Data Augmentation FIXA (Justiça contra YOLO) ---
-        data_gen_args = dict(
-            rotation_range=15,
-            width_shift_range=0.1,
-            height_shift_range=0.1,
-            zoom_range=0.1,
-            horizontal_flip=True,
-            vertical_flip=True,
-            fill_mode='reflect'
-        )
-        image_datagen = ImageDataGenerator(**data_gen_args)
-        mask_datagen = ImageDataGenerator(**data_gen_args)
+# ----------------------------------------------------------------------------
+# Sampling
+# ----------------------------------------------------------------------------
+def first_trial_params() -> dict[str, float]:
+    """Default (Baseline) hyperparameters clipped to the search bounds."""
+    return {k: float(min(max(DEFAULT_HPS[k], lo), hi)) for k, (lo, hi, _) in SEARCH_SPACE.items()}
 
-        seed_gen = np.random.randint(0, 10000)
-        image_generator = image_datagen.flow(x_train, batch_size=args.batch, seed=seed_gen)
-        mask_generator = mask_datagen.flow(y_train, batch_size=args.batch, seed=seed_gen)
-        train_generator = zip(image_generator, mask_generator)
-        
-        input_img = Input((args.imgsz, args.imgsz, 3))
-        
-        # Batchnorm fixado em True para estabilidade profunda
-        model = get_unet(input_img, n_filters=n_filters, dropout=dropout, batchnorm=True, activation=activation)
-        
-        if optimizer_name == "Adam": 
-            opt = Adam(learning_rate=lr, weight_decay=weight_decay)
-        else: 
-            momentum = trial.suggest_float("momentum", 0.85, 0.98)
-            opt = SGD(learning_rate=lr, momentum=momentum, weight_decay=weight_decay)
-            
-        if loss_type == "bce": loss_fn = "binary_crossentropy"
-        elif loss_type == "dice": loss_fn = dice_loss
-        else: loss_fn = bce_dice_loss
-            
-        model.compile(optimizer=opt, loss=loss_fn, metrics=[metric_iou, metric_dice])
-        callbacks = [EarlyStopping(patience=args.patience, restore_best_weights=True, monitor='val_metric_iou', mode='max')]
-        
-        steps_per_epoch = len(x_train) // args.batch
-        
-        history = model.fit(
-            train_generator,
-            steps_per_epoch=steps_per_epoch,
-            epochs=args.epochs,
-            validation_data=(x_val, y_val), # Validação NUNCA recebe augmentation
-            callbacks=callbacks,
-            verbose=0 
-        )
-        
-        best_iou = max(history.history.get("val_metric_iou", [0.0]))
-        
-        del model
-        del history
-        K.clear_session()
-        gc.collect()
-        
-        return best_iou
-    return objective
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--data_dir", default="/workspace/datasets/isic_2018_task1_numpy")
-    p.add_argument("--project", default="/workspace/logs/pipeline_unet_v1/hpo")
-    p.add_argument("--iterations", type=int, default=30)
-    p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--patience", type=int, default=10)
-    p.add_argument("--imgsz", type=int, default=256)
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--force", action="store_true")
+def proposal_sampler(seed: int, index: int) -> optuna.samplers.BaseSampler:
+    """Sampler for proposal ``index``: seeded TPE (fixed to the defaults for index 0)."""
+    tpe = optuna.samplers.TPESampler(seed=(seed * 1_000_003 + index) % 2**32,
+                                     n_startup_trials=TPE_STARTUP_TRIALS)
+    return optuna.samplers.PartialFixedSampler(first_trial_params(), tpe) if index == 0 else tpe
+
+
+def completed_trials(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:
+    """COMPLETE trials ordered by proposal index."""
+    trials = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
+    return sorted(trials, key=lambda t: t.user_attrs["proposal"])
+
+
+# ----------------------------------------------------------------------------
+# Outputs and checkpoint
+# ----------------------------------------------------------------------------
+def write_outputs(trials: list[optuna.trial.FrozenTrial], tune_dir: Path) -> dict[str, Any]:
+    """Write ``tune_results.csv`` and ``best_hyperparameters.yaml``; return progress counters."""
+    keys = list(SEARCH_SPACE)
+    lines = [",".join(["fitness", *keys])]
+    lines += [",".join([repr(float(t.value)), *(repr(t.params[k]) for k in keys)]) for t in trials]
+    tmp = tune_dir / ".tune_results.csv.tmp"
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(tune_dir / "tune_results.csv")
+    valid = [t for t in trials if not t.user_attrs.get("accepted_failure")]
+    progress = {"completed_trials": len(trials), "valid_trials": len(valid),
+                "best_fitness": None, "best_trial": None}
+    if valid:
+        best = max(valid, key=lambda t: (t.value, -t.user_attrs["proposal"]))  # ties → earliest
+        progress.update(best_fitness=float(best.value), best_trial=best.user_attrs["proposal"] + 1)
+        header = (f"# Phase 3 best of {len(trials)} trial(s): trial {progress['best_trial']}, "
+                  f"fitness (val JSI) = {best.value:.6f}\n")
+        tmp = tune_dir / ".best_hyperparameters.yaml.tmp"
+        tmp.write_text(header + yaml.safe_dump({k: float(best.params[k]) for k in keys}, sort_keys=False))
+        tmp.replace(tune_dir / "best_hyperparameters.yaml")
+    return progress
+
+
+class Checkpoint:
+    """``hpo_state.json`` (YOLO26 schema); every write is atomic."""
+
+    def __init__(self, path: Path, model: str, config: dict[str, Any], target: int) -> None:
+        self.path = path
+        self.state = read_json(path) or {
+            "schema": STATE_SCHEMA, "model": model, "status": "running", "target_trials": target,
+            "completed_trials": 0, "valid_trials": 0, "best_fitness": None, "best_trial": None,
+            "in_flight_trial": None, "failed_attempts": {}, "accepted_failures": [],
+            "proposals": {}, "config_hash": config_hash(config), "config": config,
+            "versions": {"optuna": optuna.__version__, "torch": torch.__version__},
+            "created_at": utc_now_iso(), "last_update": utc_now_iso(), "history": [],
+        }
+
+    def save(self) -> None:
+        self.state["last_update"] = utc_now_iso()
+        atomic_write_json(self.path, self.state)
+
+    def log(self, event: str, **info: Any) -> None:
+        self.state["history"].append({"at": utc_now_iso(), "event": event, **info})
+        self.save()
+
+
+def gpu_healthy(device) -> bool:
+    """``True`` if the NVIDIA driver and ``torch.cuda`` respond (fresh subprocess)."""
+    if device == "cpu":
+        return True
+    probe = ("import sys, torch; "
+             "sys.exit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)")
+    try:
+        subprocess.run(["nvidia-smi", "-L"], check=True, capture_output=True, timeout=60)
+        subprocess.run([sys.executable, "-c", probe], check=True, capture_output=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+# ----------------------------------------------------------------------------
+# Trials
+# ----------------------------------------------------------------------------
+def run_trial(index: int, params: dict[str, float], args, device, cache: CacheData, tune_dir: Path) -> float:
+    """Train one trial (resumable) and return its fitness (val JSI of the best epoch)."""
+    protocol = hpo_trial_protocol(device, params, args.epochs, args.patience)
+    result = train_or_resume(phase="phase3_hpo", model_name="unet", protocol=protocol, cache=cache,
+                             train_ids=cache.ids("train"), val_ids=cache.ids("val"),
+                             project=tune_dir / "trials", name=f"trial_{index:03d}")
+    return float(result["metrics"]["val_jsi"])
+
+
+def _ask(study: optuna.Study, seed: int, index: int, ckpt: Checkpoint) -> optuna.Trial:
+    """Ask proposal ``index``; verify it matches any earlier proposal for the same index."""
+    study.sampler = proposal_sampler(seed, index)
+    trial = study.ask(DISTRIBUTIONS)
+    trial.set_user_attr("proposal", index)
+    seen = ckpt.state["proposals"].get(str(index))
+    if seen is not None and seen != trial.params:
+        study.tell(trial, state=TrialState.FAIL)
+        raise RuntimeError(f"proposal {index + 1} changed on re-ask ({seen} → {trial.params}); "
+                           f"the search is no longer reproducible — use --force to restart")
+    ckpt.state["proposals"][str(index)] = trial.params
+    return trial
+
+
+def tune_one_model(model: str, args, device, cache: CacheData, paths: PipelinePaths) -> dict:
+    """Run (or resume) the HPO of one model until it is complete."""
+    tune_dir = paths.phase3_tune_dir(model)
+    if args.force:
+        backup_dir(tune_dir)
+    config = {
+        "model": model, "space": {k: list(v) for k, v in SEARCH_SPACE.items()},
+        "base_setup": {k: v for k, v in BASE_SETUP.items() if k != "workers"},
+        "trial_budget": {"epochs": args.epochs, "patience": args.patience},
+        "seed": args.seed, "sampler": {"type": "TPE", "n_startup_trials": TPE_STARTUP_TRIALS,
+                                       "first_trial": "defaults clipped to bounds"},
+        "data": {"cache": cache.fingerprint(), "train": ids_fingerprint(cache.ids("train")),
+                 "val": ids_fingerprint(cache.ids("val"))},
+    }
+    with exclusive_lock(tune_dir, ".hpo.lock"):
+        ckpt = Checkpoint(paths.phase3_state(model), model, config, args.iterations)
+        st = ckpt.state
+        if st["config_hash"] != config_hash(config):
+            raise RuntimeError(f"Configuration changed since this search started ({ckpt.path}); "
+                               f"resuming would mix trials. Revert the change or use --force.")
+        versions = {"optuna": optuna.__version__, "torch": torch.__version__}
+        if st["versions"] != versions:
+            msg = f"library versions changed since the search started ({st['versions']} → {versions})"
+            if not args.allow_version_change:
+                raise RuntimeError(msg + "; pass --allow-version-change to resume anyway")
+            print(f"  [warn] {msg}")
+        st["target_trials"] = args.iterations
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(study_name=f"{model}_hpo", direction="maximize", load_if_exists=True,
+                                    storage=f"sqlite:///{tune_dir / 'optuna_study.db'}")
+        for t in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)):
+            study._storage.set_trial_user_attr(t._trial_id, "interrupted", True)
+            study.tell(t.number, state=TrialState.FAIL)
+            ckpt.log("trial_interrupted", trial=t.user_attrs.get("proposal", -1) + 1)
+            print(f"  [resume] trial {t.user_attrs.get('proposal', -1) + 1} was interrupted — it will resume")
+
+        trials = completed_trials(study)
+        if st["status"] == "complete" and len(trials) >= args.iterations:
+            return {"model": model, "skipped": True, "reason": f"complete ({len(trials)}/{args.iterations} trials)",
+                    "elapsed_min": 0.0, "best_fitness": st["best_fitness"], "valid_trials": st["valid_trials"]}
+        ckpt.log("resume" if trials else "start", completed_trials=len(trials))
+        t0 = time.perf_counter()
+
+        while True:
+            trials = completed_trials(study)
+            st.update(write_outputs(trials, tune_dir))
+            ckpt.save()
+            index = len(trials)
+            if index >= args.iterations:
+                break
+            if not gpu_healthy(device):
+                ckpt.log("gpu_unavailable")
+                raise GPUUnavailable(f"GPU/driver unhealthy before trial {index + 1}")
+            trial = _ask(study, args.seed, index, ckpt)
+            st["in_flight_trial"] = index + 1
+            ckpt.save()
+            print(f"\n  [trial {index + 1}/{args.iterations}] "
+                  + ", ".join(f"{k}={v:.4g}" for k, v in trial.params.items()), flush=True)
+            try:
+                fitness = run_trial(index, trial.params, args, device, cache, tune_dir)
+                if not math.isfinite(fitness):
+                    raise RuntimeError(f"non-finite fitness {fitness}")
+            except Exception as e:
+                study.tell(trial, state=TrialState.FAIL)
+                if not gpu_healthy(device):
+                    ckpt.log("gpu_unavailable", trial=index + 1)
+                    raise GPUUnavailable(f"GPU/driver became unhealthy during trial {index + 1}") from e
+                attempts = st["failed_attempts"]
+                attempts[str(index)] = attempts.get(str(index), 0) + 1
+                ckpt.log("trial_failed", trial=index + 1, attempts=attempts[str(index)], error=str(e)[:300])
+                print(f"  [fail] trial {index + 1} (attempt {attempts[str(index)]}): {e}")
+                backup_dir(tune_dir / "trials" / f"trial_{index:03d}")
+                if attempts[str(index)] > args.max_trial_retries:
+                    accepted = _ask(study, args.seed, index, ckpt)
+                    accepted.set_user_attr("accepted_failure", True)
+                    study.tell(accepted, 0.0)
+                    st["accepted_failures"].append(index + 1)
+                    ckpt.log("trial_failure_accepted", trial=index + 1)
+                continue
+            study.tell(trial, fitness)
+            print(f"  [trial {index + 1}] fitness (val JSI) = {fitness:.4f}")
+
+        st.update(status="complete", in_flight_trial=None)
+        ckpt.log("complete", completed_trials=st["completed_trials"], best_fitness=st["best_fitness"])
+    return {"model": model, "skipped": False, "reason": None, "elapsed_min": (time.perf_counter() - t0) / 60,
+            "best_fitness": st["best_fitness"], "valid_trials": st["valid_trials"]}
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for Phase 3."""
+    p = argparse.ArgumentParser(description="Phase 3 — fault-tolerant, seeded Optuna HPO of the U-Net.")
+    p.add_argument("--models", nargs="+", default=DEFAULT_ORDER, choices=DEFAULT_ORDER)
+    p.add_argument("--iterations", type=int, default=30, help="Target number of trials (default: 30).")
+    p.add_argument("--epochs", type=int, default=30, help="Epochs per trial (default: 30).")
+    p.add_argument("--patience", type=int, default=10, help="Early-stopping patience per trial (default: 10).")
+    p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--max-trial-retries", type=int, default=2)
+    p.add_argument("--cache", default=DEFAULT_CACHE_DIR, help="Phase 0 cache directory.")
+    p.add_argument("--device", default="0", help="Single GPU id (default: 0) or 'cpu'.")
+    p.add_argument("--project", default=DEFAULT_PIPELINE_ROOT, help="Pipeline root.")
+    p.add_argument("--force", action="store_true", help="Start over (old search → tune_<model>.bak-<UTC>).")
+    p.add_argument("--allow-version-change", action="store_true",
+                   help="Allow resuming a search started with other Optuna/torch versions.")
     return p.parse_args()
 
-def main():
+
+def main() -> int:
+    """Run Phase 3.
+
+    Returns:
+        ``0`` on success, ``1`` if a model failed, ``75`` if the GPU is unavailable.
+    """
     args = parse_args()
-    set_seeds(args.seed)
-    tf.keras.mixed_precision.set_global_policy('float32')
-    
-    out_dir = Path(args.project) / VERSION / f"{TUNE_PREFIX}{MODEL_NAME}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    best_yaml = out_dir / "best_hyperparameters.yaml"
-    db_path = out_dir / "optuna_study.db"
+    seed_everything(args.seed)
+    device = parse_device(args.device)
+    paths = PipelinePaths(Path(args.project))
+    cache = CacheData(args.cache)
+    print(f"Phase 3 (HPO, Optuna {optuna.__version__} TPE) for {args.models}: "
+          f"{args.iterations} trials x {args.epochs} ep (patience {args.patience}), seed {args.seed}")
+    print("  search space: " + ", ".join(f"{k}∈[{lo:g},{hi:g}]{' log' if log else ''}"
+                                         for k, (lo, hi, log) in SEARCH_SPACE.items()))
+    code = 0
+    for m in args.models:
+        print("\n" + "=" * 80 + f"\n=== TUNE {m}\n" + "=" * 80)
+        try:
+            r = tune_one_model(m, args, device, cache, paths)
+            print(f"  [{m}] {'skipped — ' + r['reason'] if r['skipped'] else 'done'}; "
+                  f"best fitness {r['best_fitness']}, valid trials {r['valid_trials']}")
+        except GPUUnavailable as e:
+            print(f"  [GPU] {e} — re-run the same command once the host is healthy.", file=sys.stderr)
+            return EXIT_GPU_UNAVAILABLE
+        except Exception:
+            print(f"  [FAIL] {m}:\n{traceback.format_exc()}", file=sys.stderr)
+            code = 1
+    return code
 
-    if best_yaml.exists() and not args.force:
-        print(f"[SKIP] O YAML de hiperparâmetros já existe em {best_yaml}.")
-        return 0
-
-    print(f"\n=== Iniciando PHASE 2 (HPO U-NET ARQUITETURAL) ===")
-    
-    data_path = Path(args.data_dir)
-    try:
-        x_train = np.load(data_path / "ISIC2018_Task1-2_Training_Input" / "ISIC2018_Task1-2_Training_Input.npy")
-        y_train = np.load(data_path / "ISIC2018_Task1_Training_GroundTruth" / "ISIC2018_Task1_Training_GroundTruth.npy")
-        x_val = np.load(data_path / "ISIC2018_Task1-2_Validation_Input" / "ISIC2018_Task1-2_Validation_Input.npy")
-        y_val = np.load(data_path / "ISIC2018_Task1_Validation_GroundTruth" / "ISIC2018_Task1_Validation_GroundTruth.npy")
-        
-        if len(x_train.shape) == 3: x_train = np.expand_dims(x_train, axis=-1)
-        if len(y_train.shape) == 3: y_train = np.expand_dims(y_train, axis=-1)
-        if len(x_val.shape) == 3: x_val = np.expand_dims(x_val, axis=-1)
-        if len(y_val.shape) == 3: y_val = np.expand_dims(y_val, axis=-1)
-    except Exception as e:
-        print(f"[ERRO] Falha ao carregar dados: {e}")
-        return 1
-
-    t0 = time.perf_counter()
-    
-    study = optuna.create_study(
-        study_name="unet_hpo",
-        storage=f"sqlite:///{db_path}",
-        load_if_exists=True,
-        direction="maximize", 
-        sampler=optuna.samplers.TPESampler(seed=args.seed)
-    )
-    
-    remaining_trials = args.iterations - len(study.trials)
-    if remaining_trials > 0:
-        objective = create_objective(args, x_train, y_train, x_val, y_val)
-        study.optimize(objective, n_trials=remaining_trials)
-
-    elapsed = (time.perf_counter() - t0) / 60
-    
-    print("\n[SUCESSO] Otimização concluída em {:.1f} minutos.".format(elapsed))
-    for k, v in study.best_params.items(): print(f"  {k}: {v}")
-
-    with best_yaml.open("w") as f:
-        yaml.safe_dump(study.best_params, f, default_flow_style=False)
-        
-    return 0
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())
