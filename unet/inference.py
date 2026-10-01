@@ -37,7 +37,7 @@ from data import CacheData
 from segmentation_metrics import pixel_scores, rasterize_yolo_label
 
 #: Version of the evaluation method (part of the result cache keys).
-EVAL_VERSION: int = 1
+EVAL_VERSION: int = 2   # 2: + boundary metrics (BIoU, NSD)
 
 #: Probability threshold of the binary prediction.
 PROB_THRESHOLD: float = 0.5
