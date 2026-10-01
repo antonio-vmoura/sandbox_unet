@@ -15,9 +15,9 @@ model-specific parts differ). For every ``variant`` × ``model`` ×
     timed with ``torch.cuda.Event`` pairs and a ``synchronize`` after every
     iteration. Primary "model latency" figure.
   - ``end_to_end``: the deployed prediction pipeline on a real test image as
-    stored in the dataset (640×640): BGR→RGB, area-resize to 256, scaling to
+    stored in the dataset (dataset resolution): BGR→RGB, area-resize to 256, scaling to
     [0, 1], host→device copy, forward, sigmoid, bilinear upsampling back to
-    640×640, threshold 0.5, device→host copy of the mask. Timed with
+    dataset resolution, threshold 0.5, device→host copy of the mask. Timed with
     ``time.perf_counter`` around a synchronised call (it includes CPU work).
 
 * **FPS** = 1000 / mean latency (``fps``) and 1000 / median (``fps_median``).
@@ -363,7 +363,7 @@ def benchmark_one(
 
 
 def _first_test_image(cache_dir: str, data_root: str | None) -> str:
-    """Deterministic sample image for the end-to-end benchmark (first test image, 640×640)."""
+    """Deterministic sample image for the end-to-end benchmark (first test image, dataset resolution)."""
     from data import CacheData
     from inference import resolve_data_root
 

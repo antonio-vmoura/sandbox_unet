@@ -14,9 +14,10 @@ with ``S = 256`` (the U-Net input size).
 
 Processing of each image (deterministic):
 
-* **Ground truth** — the YOLO polygons are rasterised at the image's own
-  resolution with :func:`segmentation_metrics.rasterize_yolo_label`, the very
-  function YOLO's Phase 5 uses to score predictions.
+* **Ground truth** — the official ISIC mask of the image, as written by YOLO26's
+  Phase 0 (``masks/<id>.png``, read with :func:`segmentation_metrics.ground_truth_mask`,
+  the very function every pipeline's Phase 5 scores predictions against; datasets
+  without mask images fall back to the rasterised YOLO polygons).
 * **Image** — resized to ``S × S`` with area interpolation (``cv2.INTER_AREA``).
 * **Mask** — the full-resolution binary mask is area-resized to ``S × S``
   (each output pixel = fraction of lesion pixels it covers) and thresholded at
@@ -30,6 +31,8 @@ Guarantees and checks:
   identical K-Fold partitions.
 * ISIC identifiers must be unique across splits (no image in two splits) —
   otherwise the script aborts.
+* The split sizes must be **exactly** the official ISIC 2018 Task 1 ones
+  (2,594 / 100 / 1,000; :data:`EXPECTED_COUNTS`) — asserted on input and output.
 * Every mask is verified to contain only {0, 1}.
 * The cache is rebuilt only when the source dataset (SHA-256 of every image
   and label file) or the parameters change; ``--force`` rebuilds it anyway.
@@ -38,7 +41,7 @@ Guarantees and checks:
 
 Usage:
     python prepare_dataset.py \\
-        --yolo-data /workspace/datasets/isic_2018_task1_yolo26/data.yaml \\
+        --yolo-data /workspace/yolo26_dataset/data.yaml \\
         --out /workspace/datasets/isic_2018_task1_unet256
 """
 
@@ -65,13 +68,16 @@ from common import (
     utc_now_iso,
     utc_stamp,
 )
-from segmentation_metrics import label_path_for, rasterize_yolo_label
+from segmentation_metrics import ground_truth_mask, label_path_for, mask_path_for
 
 #: Version of the preprocessing method (part of the cache fingerprint).
 PREP_VERSION: int = 1
 
 #: Splits of ``data.yaml`` (key → cache folder name).
 SPLITS: dict[str, str] = {"train": "train", "val": "val", "test": "test"}
+
+#: Official ISIC 2018 Task 1 split sizes (3,694 images) — enforced with assertions.
+EXPECTED_COUNTS: dict[str, int] = {"train": 2594, "val": 100, "test": 1000}
 
 #: Image extensions recognised (same as YOLO26's cross-validation).
 IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
@@ -114,13 +120,14 @@ def resolve_split(data_yaml: Path, key: str) -> tuple[Path, list[Path]]:
 
 
 def source_fingerprint(images: list[Path], root: Path) -> str:
-    """SHA-256 over (relative path, image SHA-256, label SHA-256) of a split."""
+    """SHA-256 over (relative path, image, label and mask SHA-256) of a split."""
     h = hashlib.sha256()
     for img in images:
-        lab = label_path_for(img)
+        lab, msk = label_path_for(img), mask_path_for(img)
         h.update(str(img.relative_to(root)).encode())
         h.update(sha256_file(img).encode())
         h.update((sha256_file(lab) if lab.exists() else "no-label").encode())
+        h.update((sha256_file(msk) if msk.exists() else "no-mask").encode())
     return h.hexdigest()
 
 
@@ -130,7 +137,7 @@ def process_image(img_path: Path, size: int) -> tuple[np.ndarray, np.ndarray, di
     if bgr is None:
         raise OSError(f"cannot read {img_path}")
     h, w = bgr.shape[:2]
-    gt = rasterize_yolo_label(label_path_for(img_path), h, w)
+    gt = ground_truth_mask(img_path, h, w)
     img = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (size, size), interpolation=cv2.INTER_AREA)
     frac = cv2.resize(gt.astype(np.float32), (size, size), interpolation=cv2.INTER_AREA)
     mask = (frac >= MASK_THRESHOLD).astype(np.uint8)
@@ -197,6 +204,12 @@ def main() -> int:
         print(f"[error] {e}", file=sys.stderr)
         return 2
 
+    # ---- Official split sizes ----------------------------------------------
+    for name, (_, images) in resolved.items():
+        assert len(images) == EXPECTED_COUNTS[name], (
+            f"{name}: {len(images)} images in {data_yaml}, expected exactly {EXPECTED_COUNTS[name]} "
+            f"(official ISIC 2018 Task 1) — rebuild the YOLO26 dataset from the raw release")
+
     # ---- No image may appear in two splits --------------------------------
     owner: dict[str, str] = {}
     for name, (_, images) in resolved.items():
@@ -225,6 +238,7 @@ def main() -> int:
     for name, (root, images) in resolved.items():
         print(f"  building {name} ...")
         splits_meta[name] = build_split(images, root, tmp / name, args.imgsz)
+        assert splits_meta[name]["n_images"] == EXPECTED_COUNTS[name], f"{name}: cached {splits_meta[name]['n_images']} images"
     atomic_write_json(tmp / "meta.json", {
         "created_at": utc_now_iso(),
         "source_data_yaml": str(data_yaml),

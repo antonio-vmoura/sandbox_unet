@@ -11,15 +11,16 @@ with the same notebooks.
 
 | Aspect | How it is guaranteed |
 |---|---|
-| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2547/100/994 — same polygon labels). Every sample is addressed by its ISIC ID. |
+| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2,594/100/1,000, the official split — same polygon labels). Every sample is addressed by its ISIC ID. |
 | **Same CV folds** | The CV pool is in YOLO26's order and uses YOLO26's K-Fold algorithm (NumPy `RandomState(0)`, no scikit-learn) → **identical folds** (verified). |
-| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original 640×640 and scored against the ground truth rasterised from the same YOLO labels. |
+| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original dataset resolution and scored against the ground truth rasterised from the same YOLO labels. |
 | **Same profiling** | `benchmark_efficiency.py` is derived from YOLO26's: same `torch.cuda.Event` timing, statistics, steady-state VRAM, contention checks and JSON schema; same PyTorch version. |
 | **Same software stack** | The Docker image pins `torch==2.5.1` / `torchvision==0.20.1` (cu121) like YOLO26, plus `optuna==5.0.0`. |
 
 **Resolution ceiling.** A perfect 256×256 prediction, processed by the U-Net inference pipeline (bilinear
-upsampling to 640×640, threshold 0.5), scores **DSC 0.9967** on the test set (min 0.965) — the maximum
-achievable at the U-Net's input resolution (measured with an oracle model on all 994 test images).
+upsampling to dataset resolution, threshold 0.5), scores **DSC 0.9967** on the test set (min 0.965) — the maximum
+achievable at the U-Net's input resolution (measured with an oracle model on the 994 test images of the earlier
+Roboflow export; **[re-measure on the official 1,000-image test set]**).
 
 ---
 
@@ -29,7 +30,7 @@ achievable at the U-Net's input resolution (measured with an oracle model on all
 |---|---|---|---|
 | **0 — Data cache** | 256×256 arrays from the YOLO26 dataset; strictly binary masks; ID manifests; SHA-256 provenance | train / val / test | `prepare_dataset.py` |
 | **1 — Baseline** | Base setup + **Keras-baseline default** hyperparameters | train / val | `train_baseline_models.py` |
-| **2 — Baseline CV** | 5-fold CV with the Phase 1 configuration; DSC/JSI per fold at 640×640 | train ∪ val pool (**test excluded and verified**) | `train_cv_unet.py`, `consolidate_cv_results_unet.py`, `evaluate_cv_pixels.py` |
+| **2 — Baseline CV** | 5-fold CV with the Phase 1 configuration; DSC/JSI per fold at dataset resolution | train ∪ val pool (**test excluded and verified**) | `train_cv_unet.py`, `consolidate_cv_results_unet.py`, `evaluate_cv_pixels.py` |
 | **3 — HPO** | Optuna TPE, **seeded per proposal**, fault-tolerant and resumable | train / val | `tune_unet.py`, `check_hpo_validity.py` |
 | **4 — Optimised** | Same base setup + Phase 3 hyperparameters | train / val | `train_optimized_unet.py` |
 | **5 — Test set** | Baseline **and** Optimised: DSC, JSI, ISIC thresholded JSI, sensitivity, specificity (FP32 + FP16); batch-1 efficiency (FP32 + FP16); final report | **test** (only here) | `evaluate_test_set.py`, `benchmark_efficiency.py`, `build_final_report.py` |
@@ -113,7 +114,7 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
     -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
     -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
     -v "$(pwd)/datasets:/workspace/datasets" \
-    -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/yolo26_dataset:ro" \
+    -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task1_official:/workspace/yolo26_dataset:ro" \
     -v "$(pwd)/logs:/workspace/logs" \
     -v "$(pwd)/unet:/workspace/unet" \
     -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \
@@ -159,7 +160,7 @@ GPU_DEVICE=1 ./wait_gpu_unet.sh     # polls nvidia-smi, then launches the docker
 ## Phase 5 — what exactly is measured
 
 **Accuracy (`evaluate_test_set.py`)** — test split only, batch 1, FP32 (primary) and FP16. The 256×256
-probability map is upsampled bilinearly to 640×640 and thresholded at 0.5; per image: DSC, JSI, ISIC
+probability map is upsampled bilinearly to dataset resolution and thresholded at 0.5; per image: DSC, JSI, ISIC
 thresholded JSI (`JSI < 0.65 → 0`), sensitivity, specificity, accuracy (empty prediction → 0, never skipped).
 Same aggregates and JSON/CSV schema as YOLO26; YOLO26's Ultralytics-only instance metrics (box/mask mAP, P, R,
 F1) are present as `NaN`.

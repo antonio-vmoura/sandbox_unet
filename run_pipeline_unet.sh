@@ -32,7 +32,7 @@
 set -euo pipefail
 
 # ---------- Defaults ---------------------------------------------------------
-YOLO_DATA_YAML="${YOLO_DATA_YAML:-/workspace/datasets/isic_2018_task1_yolo26/data.yaml}"
+YOLO_DATA_YAML="${YOLO_DATA_YAML:-/workspace/yolo26_dataset/data.yaml}"
 CACHE_DIR="${CACHE_DIR:-/workspace/datasets/isic_2018_task1_unet256}"
 LOGS_ROOT="${LOGS_ROOT:-/workspace/logs}"
 PIPELINE_NAME="${PIPELINE_NAME:-pipeline_final_v1}"

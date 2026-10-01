@@ -57,7 +57,7 @@ DEFAULT_ORDER: list[str] = ["unet"]
 
 #: YOLO-format dataset — the single source of truth shared with YOLO26
 #: (identical images, splits and polygon labels).
-DEFAULT_YOLO_DATA_YAML: str = "/workspace/datasets/isic_2018_task1_yolo26/data.yaml"
+DEFAULT_YOLO_DATA_YAML: str = "/workspace/yolo26_dataset/data.yaml"
 
 #: Phase 0 output: 256×256 cached arrays + ID manifests.
 DEFAULT_CACHE_DIR: str = "/workspace/datasets/isic_2018_task1_unet256"

@@ -55,7 +55,7 @@ docker run --gpus "\"device=${GPU_DEVICE}\"" --rm --ipc=host \
   -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
   -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
   -v "$(pwd)/datasets:/workspace/datasets" \
-  -v "$(pwd)/../sandbox_yolo26/datasets/isic_2018_task1_yolo26:/workspace/yolo26_dataset:ro" \
+  -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task1_official:/workspace/yolo26_dataset:ro" \
   -v "$(pwd)/logs:/workspace/logs" \
   -v "$(pwd)/unet:/workspace/unet" \
   -v "$(pwd)/run_pipeline_unet.sh:/workspace/run_pipeline_unet.sh:ro" \

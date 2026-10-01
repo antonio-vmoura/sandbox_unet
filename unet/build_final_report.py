@@ -12,7 +12,7 @@ Inputs (all produced by earlier steps of ``run_pipeline.sh``)::
 
     summary/phase1_val.json, summary/phase4_val.json        # single-split val metrics
     phase2_cv_baseline/<m>/metrics_summary.json              # CV validation metrics
-    phase2_cv_baseline/<m>/pixel_metrics_summary.json        # CV DSC/JSI (640x640)
+    phase2_cv_baseline/<m>/pixel_metrics_summary.json        # CV DSC/JSI (dataset resolution)
     phase3_hpo/tune_<m>/hpo_state.json                        # HPO bookkeeping
     phase5_test/accuracy/*.json, phase5_test/per_image/*.csv  # test accuracy
     phase5_test/efficiency/*.json                             # efficiency
