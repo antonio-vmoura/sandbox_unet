@@ -240,7 +240,7 @@ sandbox_unet/
 ├── notebooks/
 │   ├── 01_Segmentation_Visualizer.ipynb
 │   └── 02_Metrics_and_Efficiency_Analysis.ipynb
-├── utils/                     # earlier notebooks
+├── notebooks/legacy/          # earlier notebooks, incl. the original Keras U-Net (kept as a backup)
 └── datasets/  logs/           # not versioned
 ```
 
