@@ -82,6 +82,8 @@ from common import (
     DEFAULT_HPS,
     DEFAULT_ORDER,
     DEFAULT_PIPELINE_ROOT,
+    HPO_EPOCHS,
+    HPO_PATIENCE,
     PROTECTED_KEYS,
     SEED,
     TUNABLE_KEYS,
@@ -331,8 +333,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase 3 — fault-tolerant, seeded Optuna HPO of the U-Net.")
     p.add_argument("--models", nargs="+", default=DEFAULT_ORDER, choices=DEFAULT_ORDER)
     p.add_argument("--iterations", type=int, default=30, help="Target number of trials (default: 30).")
-    p.add_argument("--epochs", type=int, default=30, help="Epochs per trial (default: 30).")
-    p.add_argument("--patience", type=int, default=10, help="Early-stopping patience per trial (default: 10).")
+    p.add_argument("--epochs", type=int, default=HPO_EPOCHS, help=f"Epochs per trial (default: {HPO_EPOCHS}).")
+    p.add_argument("--patience", type=int, default=HPO_PATIENCE,
+                   help=f"Early-stopping patience per trial (default: {HPO_PATIENCE} = no early stopping).")
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--max-trial-retries", type=int, default=2)
     p.add_argument("--cache", default=DEFAULT_CACHE_DIR, help="Phase 0 cache directory.")

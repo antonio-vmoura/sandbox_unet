@@ -47,7 +47,7 @@ base setup is identical in every phase and can never be overridden by a tuned fi
 | Optimiser / schedule | AdamW (decoupled weight decay ≡ Keras `Adam(weight_decay)`), eps 1e-7, β2 0.999, constant LR |
 | Loss | BCE + soft Dice (original Keras `bce_dice_loss`) |
 | Input / batch | 256×256, batch 16 |
-| Budget | 120 epochs, early-stopping patience 25 on validation JSI (HPO trials: 30 / 10) |
+| Budget | 120 epochs, no early stopping (patience 120; HPO trials: 30 epochs, patience 30); `best.pt` = best validation JSI |
 | Numerics | FP32 (`amp=False`), seed 0, deterministic algorithms |
 
 | Tuned (Phase 3) | Default (Baseline) | Search range |
@@ -141,7 +141,7 @@ docker run --gpus "\"device=${GPU}\"" -it --rm --ipc=host \
 ```
 
 Environment overrides (defaults): `CV_K_FOLDS=5`, `CV_SEED=0`, `HPO_ITERATIONS=30`, `HPO_EPOCHS_PER_TRIAL=30`,
-`HPO_PATIENCE=10`, `HPO_MAX_RETRIES=5`, `HPO_RETRY_WAIT=600`, `EVAL_PRECISIONS="fp32 fp16"`, `YOLO_DATA_YAML`,
+`HPO_PATIENCE=30`, `HPO_MAX_RETRIES=5`, `HPO_RETRY_WAIT=600`, `EVAL_PRECISIONS="fp32 fp16"`, `YOLO_DATA_YAML`,
 `CACHE_DIR`, `LOGS_ROOT`, `PROJECT`.
 
 Exit codes: `0` success · `75` the HPO gave up after repeated GPU failures (fix the driver and re-run to
