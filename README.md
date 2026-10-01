@@ -93,6 +93,25 @@ count matches exactly.
 
 ---
 
+## ISIC 2018 Task 2 (lesion attributes) — Phase 0
+
+`prepare_dataset.py --task 2` builds a **multi-label** cache from the Task 2 YOLO26 dataset (built first with
+YOLO26's `prepare_dataset.py --task 2`; mount it at `/workspace/yolo26_dataset_task2`): `masks.npy` has shape
+N × 256 × 256 × **5**, one independent binary channel per attribute (`pigment_network`, `negative_network`,
+`streaks`, `milia_like_cyst`, `globules`) — attributes may overlap, so the channels are not mutually exclusive.
+Output: `datasets/isic_2018_task2_unet256`; same 2,594 / 100 / 1,000 images asserted.
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -v "$(pwd)/datasets:/workspace/datasets" -v "$(pwd)/unet:/workspace/unet" \
+    -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task2_official:/workspace/yolo26_dataset_task2:ro" \
+    -w /workspace/unet --entrypoint python unet_ft prepare_dataset.py --task 2
+```
+
+`--task 1` is the default everywhere (the orchestrator and `wait_gpu_unet.sh` run Task 1); **Phases 1–5 currently
+implement Task 1 only** (a 5-channel output head with per-channel sigmoid and per-attribute metrics are needed for
+Task 2).
+
 ## Running the pipeline
 
 ### Build the image

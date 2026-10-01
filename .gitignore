@@ -231,3 +231,5 @@ datasets/isic_2018_task1_unet256*/
 
 #My files
 METHODOLOGY_NOTES_FOR_ARTICLE.md
+# Task 2 (lesion attributes) Phase 0 cache and its backups
+datasets/isic_2018_task2_unet256*/
