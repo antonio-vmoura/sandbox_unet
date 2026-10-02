@@ -245,8 +245,8 @@ sandbox_unet/
 │   ├── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
 │   └── legacy/                # previous TensorFlow/Keras scripts (not used)
 ├── notebooks/
-│   ├── 01_Segmentation_Visualizer.ipynb
-│   └── 02_Metrics_and_Efficiency_Analysis.ipynb
+│   ├── 01_segmentation_visualizer.ipynb
+│   └── 02_metrics_and_efficiency_analysis.ipynb
 ├── notebooks/legacy/          # earlier notebooks, incl. the original Keras U-Net (kept as a backup)
 └── datasets/  logs/           # not versioned
 ```
@@ -254,8 +254,8 @@ sandbox_unet/
 ## Analysis notebooks
 
 Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outputs; no GPU needed):
-`01_Segmentation_Visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
-`02_Metrics_and_Efficiency_Analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
+`01_segmentation_visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
+`02_metrics_and_efficiency_analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
 FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables, and the standard figures A–C shared
 with YOLO26 and SAM 3). The cross-architecture analysis notebook is in `analysis/` (see `analysis/README.md`). The YOLO26 dataset is located
 automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
