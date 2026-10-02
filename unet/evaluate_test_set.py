@@ -9,10 +9,11 @@ is evaluated on the ``test`` split — the only phase that ever touches it:
 * **Pixel metrics** (:mod:`inference`) — per image, batch = 1: the U-Net
   probability map (256×256) is upsampled bilinearly to the image's original
   resolution (dataset resolution, as YOLO26's evaluation) and thresholded at 0.5; it is
-  scored against the ground truth rasterised from the **same YOLO labels**
-  with :func:`segmentation_metrics.pixel_scores`: DSC, JSI, ISIC thresholded
-  JSI, sensitivity, specificity, accuracy. Empty predictions score 0 (never
-  skipped). Aggregates: per-image mean, sample std, median, IQR, seeded
+  scored against the **same official ISIC mask** as YOLO26
+  (:func:`segmentation_metrics.ground_truth_mask`) with
+  :func:`segmentation_metrics.pixel_scores`: DSC, JSI, ISIC thresholded JSI,
+  sensitivity, specificity, accuracy, Boundary IoU, NSD, HD95. Empty
+  predictions score 0 (never skipped). Aggregates: per-image mean, sample std, median, IQR, seeded
   bootstrap 95 % CI, pooled DSC/JSI (:func:`segmentation_metrics.aggregate_scores`).
 * **Instance metrics** — YOLO26's box/mask mAP, P, R and F1 are Ultralytics
   instance-level metrics that do not exist for a semantic-segmentation

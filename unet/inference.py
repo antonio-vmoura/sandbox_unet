@@ -37,7 +37,7 @@ from data import CacheData
 from segmentation_metrics import ground_truth_mask, pixel_scores
 
 #: Version of the evaluation method (part of the result cache keys).
-EVAL_VERSION: int = 2   # 2: + boundary metrics (BIoU, NSD)
+EVAL_VERSION: int = 3   # 2: + boundary metrics (BIoU, NSD); 3: + HD95
 
 #: Probability threshold of the binary prediction.
 PROB_THRESHOLD: float = 0.5

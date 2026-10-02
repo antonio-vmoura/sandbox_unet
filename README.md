@@ -33,7 +33,7 @@ Roboflow export; **[re-measure on the official 1,000-image test set]**).
 | **2 — Baseline CV** | 5-fold CV with the Phase 1 configuration; DSC/JSI per fold at dataset resolution | train ∪ val pool (**test excluded and verified**) | `train_cv_unet.py`, `consolidate_cv_results_unet.py`, `evaluate_cv_pixels.py` |
 | **3 — HPO** | Optuna TPE, **seeded per proposal**, fault-tolerant and resumable | train / val | `tune_unet.py`, `check_hpo_validity.py` |
 | **4 — Optimised** | Same base setup + Phase 3 hyperparameters | train / val | `train_optimized_unet.py` |
-| **5 — Test set** | Baseline **and** Optimised: DSC, JSI, ISIC thresholded JSI, sensitivity, specificity (FP32 + FP16); batch-1 efficiency (FP32 + FP16); final report | **test** (only here) | `evaluate_test_set.py`, `benchmark_efficiency.py`, `build_final_report.py` |
+| **5 — Test set** | Baseline **and** Optimised: DSC, JSI, ISIC thresholded JSI, sensitivity, specificity, Boundary IoU, NSD, HD95 with bootstrap 95 % CI (FP32 + FP16); batch-1 efficiency — median/P95 latency, FPS, peak VRAM (FP32 + FP16); final report | **test** (only here) | `evaluate_test_set.py`, `benchmark_efficiency.py`, `build_final_report.py` |
 
 Everything is orchestrated by **`run_pipeline_unet.sh`**; the protocol is defined once in **`unet/common.py`**.
 
@@ -180,7 +180,8 @@ GPU_DEVICE=1 ./wait_gpu_unet.sh     # polls nvidia-smi, then launches the docker
 
 **Accuracy (`evaluate_test_set.py`)** — test split only, batch 1, FP32 (primary) and FP16. The 256×256
 probability map is upsampled bilinearly to dataset resolution and thresholded at 0.5; per image: DSC, JSI, ISIC
-thresholded JSI (`JSI < 0.65 → 0`), sensitivity, specificity, accuracy (empty prediction → 0, never skipped).
+thresholded JSI (`JSI < 0.65 → 0`), sensitivity, specificity, accuracy (empty prediction → 0, never skipped),
+and the boundary metrics Boundary IoU, NSD and HD95 (as YOLO26).
 Same aggregates and JSON/CSV schema as YOLO26; YOLO26's Ultralytics-only instance metrics (box/mask mAP, P, R,
 F1) are present as `NaN`.
 
@@ -188,8 +189,14 @@ F1) are present as `NaN`.
 
 * forward latency of the **fused** U-Net (BatchNorm folded, as Ultralytics' `fuse()` for YOLO26) on
   1×3×256×256 with `torch.cuda.Event` (50 warm-up + 500 timed); end-to-end latency of the deployed pipeline
-  (640 image → resize → forward → upsample → threshold) with `perf_counter` (20 + 200);
+  (test image at dataset resolution → resize → forward → upsample → threshold → mask on the host) with `perf_counter` (20 + 200);
 * mean, SD, median, P90/P95/P99, FPS = 1000 / mean;
+* **Driver-level VRAM**: `vram_process_peak_mb` = device memory held by the benchmark process at the end of the
+  forward / end-to-end loops (CUDA context, kernels and allocator cache included; `nvidia-smi` delta) and
+  `vram_cuda_context_mb` — the memory a deployment GPU must provide, next to the allocator peak (the model).
+* **`end_to_end_dataset`**: the end-to-end pipeline once on each of the first 100 test images sorted by ISIC ID
+  (the same images in the three repositories; `--e2e-images`), after one untimed pass — median/P95 over real,
+  varying inputs. The real-time criterion in the notebooks uses its P95.
 * steady-state peak VRAM after warm-up (cuDNN autotune workspaces excluded and reported separately), weight
   VRAM, host RAM;
 * parameters (2,161,649; fused 2,158,705), GFLOPs (2 × MACs, thop) at the native 256×256 input (6.40) and,
@@ -249,7 +256,8 @@ sandbox_unet/
 Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outputs; no GPU needed):
 `01_Segmentation_Visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
 `02_Metrics_and_Efficiency_Analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
-FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables). The YOLO26 dataset is located
+FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables, and the standard figures A–C shared
+with YOLO26 and SAM 3). The cross-architecture article notebook is in `article/` (see `article/README.md`). The YOLO26 dataset is located
 automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
 sibling repository is visible).
 
