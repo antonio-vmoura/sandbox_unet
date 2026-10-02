@@ -257,7 +257,7 @@ Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outp
 `01_Segmentation_Visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
 `02_Metrics_and_Efficiency_Analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
 FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables, and the standard figures A–C shared
-with YOLO26 and SAM 3). The cross-architecture article notebook is in `article/` (see `article/README.md`). The YOLO26 dataset is located
+with YOLO26 and SAM 3). The cross-architecture article notebook is in `analysis/` (see `analysis/README.md`). The YOLO26 dataset is located
 automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
 sibling repository is visible).
 
