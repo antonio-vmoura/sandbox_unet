@@ -245,10 +245,11 @@ sandbox_unet/
 │   ├── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
 │   └── legacy/                # previous TensorFlow/Keras scripts (not used)
 ├── analysis/                  # every Jupyter notebook + the cross-architecture tooling
-│   ├── 01_segmentation_visualizer.ipynb
-│   ├── 02_metrics_and_efficiency_analysis.ipynb
-│   ├── unet_internal_analysis.ipynb
-│   ├── results_analysis.ipynb  results_aggregator.py  methodology_notes.md
+│   ├── 01_internal_analysis.ipynb          # run first: every phase, from the first epoch of Phase 1
+│   ├── 02_segmentation_visualizer.ipynb    # Phase 5
+│   ├── 03_metrics_and_efficiency.ipynb     # Phase 5
+│   ├── 04_cross_architecture_results.ipynb # Phase 5, all three architectures
+│   ├── results_aggregator.py  methodology_notes.md
 │   └── legacy/                # earlier notebooks, incl. the original Keras U-Net (kept as a backup)
 └── datasets/  logs/           # not versioned
 ```
@@ -256,10 +257,10 @@ sandbox_unet/
 ## Analysis notebooks
 
 Same notebooks as YOLO26, adapted to the U-Net (they read only the pipeline outputs; no GPU needed):
-`analysis/01_segmentation_visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
-`analysis/02_metrics_and_efficiency_analysis` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
+`analysis/02_segmentation_visualizer` (ground truth green/solid vs. prediction red/dashed, Baseline vs. Optimised) and
+`analysis/03_metrics_and_efficiency` (DSC/JSI across phases, paired HPO gain, accuracy vs. size, latency vs.
 FPS, latency distribution, memory, accuracy–latency trade-off, LaTeX tables, and the standard figures A–C shared
-with YOLO26 and SAM 3). `analysis/unet_internal_analysis.ipynb` drills into every phase of the U-Net (curves, CV folds, HPO, test metrics, segmentation grid; missing phases are skipped). The cross-architecture analysis notebook is in `analysis/` (see `analysis/README.md`). The YOLO26 dataset is located
+with YOLO26 and SAM 3). `analysis/01_internal_analysis.ipynb` drills into every phase of the U-Net (curves, CV folds, HPO, test metrics, segmentation grid; missing phases are skipped). The cross-architecture analysis notebook is in `analysis/` (see `analysis/README.md`). The YOLO26 dataset is located
 automatically (`datasets/` or `../sandbox_yolo26/datasets/`; the command below mounts the parent folder so the
 sibling repository is visible).
 
