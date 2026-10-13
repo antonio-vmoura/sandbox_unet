@@ -243,6 +243,18 @@ def protocol_fingerprint(protocol: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in protocol.items() if k not in _HASH_EXCLUDED}
 
 
+def epoch_lr(protocol: dict[str, Any], epoch: int) -> float:
+    """Learning rate of ``epoch`` (1-based): ``lr0`` (constant), or cosine from ``lr0`` to ``lr0 * lr_final_factor``.
+
+    A pure function of the epoch, so a resumed run uses exactly the rate of an uninterrupted one.
+    """
+    if protocol.get("lr_schedule", "constant") != "cosine":
+        return protocol["lr0"]
+    f, n = protocol["lr_final_factor"], protocol["epochs"]
+    t = (epoch - 1) / max(1, n - 1)
+    return protocol["lr0"] * (f + (1 - f) * 0.5 * (1 + math.cos(math.pi * t)))
+
+
 def train_or_resume(
     *,
     phase: str,
@@ -355,6 +367,9 @@ def _train_locked(phase, model_name, protocol, cache, train_ids, val_ids, projec
         if final:
             break
         te = time.perf_counter()
+        if protocol.get("lr_schedule", "constant") == "cosine":
+            for group in opt.param_groups:
+                group["lr"] = epoch_lr(protocol, epoch)
         model.train()
         train_ds.set_epoch(epoch)
         train_sampler.set_epoch(epoch)

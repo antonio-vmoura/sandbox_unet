@@ -84,6 +84,16 @@ HPO_PATIENCE: int = 30
 IMGSZ: int = 256
 
 #: Fixed base setup shared by EVERY phase. Never searched, never overridden.
+#: Learning-rate schedule of every phase. ``"constant"`` is the original Keras baseline — the study's U-Net
+#: (``pipeline_final_v1``). ``"cosine"`` exists only for the LR-schedule sensitivity analysis: set
+#: ``UNET_LR_SCHEDULE=cosine`` and a separate ``PIPELINE_NAME`` (run_pipeline_unet.sh refuses
+#: ``pipeline_final_v1``). Cosine decays per epoch from ``lr0`` to ``lr0 * COSINE_FINAL_FACTOR``, as YOLO26's
+#: ``cos_lr`` with ``lrf = 0.01``. The default leaves BASE_SETUP — and every protocol hash — unchanged.
+LR_SCHEDULE: str = os.environ.get("UNET_LR_SCHEDULE", "constant")
+if LR_SCHEDULE not in ("constant", "cosine"):
+    raise ValueError(f"UNET_LR_SCHEDULE must be 'constant' or 'cosine', not {LR_SCHEDULE!r}")
+COSINE_FINAL_FACTOR: float = 0.01
+
 BASE_SETUP: dict[str, Any] = {
     # Architecture (original Keras baseline: get_unet_baseline)
     "n_filters": 16,
@@ -93,7 +103,7 @@ BASE_SETUP: dict[str, Any] = {
     "optimizer": "AdamW",        # decoupled weight decay == Keras Adam(weight_decay=...)
     "adam_eps": 1e-7,            # Keras default epsilon
     "beta2": 0.999,
-    "lr_schedule": "constant",   # the original Keras baseline used a constant LR
+    "lr_schedule": LR_SCHEDULE,  # "constant" = the original Keras baseline (see LR_SCHEDULE)
     "loss": "bce_dice",          # BCE + soft Dice (original Keras bce_dice_loss)
     # Data / budget / numerics
     "imgsz": IMGSZ,
@@ -104,6 +114,8 @@ BASE_SETUP: dict[str, Any] = {
     "deterministic": True,
     "monitor": "val_jsi",        # best-epoch and early-stopping criterion (ISIC ranking metric)
 }
+if LR_SCHEDULE == "cosine":      # only in the sensitivity run, so the constant protocol keeps its hash
+    BASE_SETUP["lr_final_factor"] = COSINE_FINAL_FACTOR
 
 #: Default hyperparameters = the original Keras baseline, expressed with the
 #: names of the search space. Augmentation reproduces ImageDataGenerator(

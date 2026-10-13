@@ -66,7 +66,7 @@ mkdir -p "logs/${PIPELINE_NAME}"
 docker run --gpus "\"device=${GPU_DEVICE}\"" --rm --ipc=host \
   --user "$(id -u):$(id -g)" \
   -e HOME=/workspace/cache -e TORCH_HOME=/workspace/cache/torch \
-  -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" \
+  -e GPU_DEVICE=0 -e PIPELINE_NAME="${PIPELINE_NAME}" -e UNET_LR_SCHEDULE="${UNET_LR_SCHEDULE:-constant}" \
   -e YOLO_DATA_YAML=/workspace/yolo26_dataset/data.yaml \
   -v "$(pwd)/datasets:/workspace/datasets" \
   -v "$(pwd)/../sandbox_yolo26/datasets/isic2018_task1_official:/workspace/yolo26_dataset:ro" \
