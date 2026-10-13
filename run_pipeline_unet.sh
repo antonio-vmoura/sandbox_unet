@@ -15,10 +15,11 @@
 #                                    resolution and profiling as YOLO26)
 #
 # Every phase shares one base setup (U-Net 16 filters, ReLU, BN, AdamW,
-# constant LR, BCE+Dice, batch 16, FP32, seed 0; epochs=120 / patience=120 =
+# BCE+Dice loss family, batch 16, FP32, seed 0; epochs=120 / patience=120 =
 # no early stopping, for Phases 1, 2 and 4; HPO trials 30 / 30), defined once in unet/common.py, so the tuned
-# hyperparameters (learning dynamics + augmentation) are the only variable
-# between Baseline and Optimised.
+# hyperparameters (learning rate, LR schedule and warm-up, weight decay, beta1,
+# Dice weight, dropout, augmentation) are the only variable between Baseline
+# (constant LR 1e-3, no weight decay, no warm-up, Dice weight 1) and Optimised.
 #
 # Fault tolerance: every step is idempotent and resumable — re-running the
 # same command continues where it stopped; interrupted trainings resume
@@ -129,13 +130,6 @@ done
 
 if [[ "${PROJECT_EXPLICIT}" -eq 0 && "${PROJECT_FORCED}" -eq 0 ]]; then
     PROJECT="${LOGS_ROOT}/${PIPELINE_NAME}"
-fi
-# LR-schedule sensitivity run (unet/common.py LR_SCHEDULE): never inside the study's own pipeline folder
-export UNET_LR_SCHEDULE="${UNET_LR_SCHEDULE:-constant}"
-if [[ "${UNET_LR_SCHEDULE}" != "constant" && "$(basename "${PROJECT}")" == "pipeline_final_v1" ]]; then
-    echo "[erro] UNET_LR_SCHEDULE=${UNET_LR_SCHEDULE} would write into pipeline_final_v1 (the study's U-Net)." >&2
-    echo "       Use a separate pipeline, e.g. PIPELINE_NAME=pipeline_unet_cosine_v1." >&2
-    exit 2
 fi
 BENCH_DEVICE="${BENCH_DEVICE:-${GPU_DEVICE}}"
 for dev in "${GPU_DEVICE}" "${BENCH_DEVICE}"; do
@@ -256,7 +250,7 @@ log "=============================================================="
 log "  yolo data      = ${YOLO_DATA_YAML}"
 log "  cache          = ${CACHE_DIR}"
 log "  project        = ${PROJECT}"
-log "  lr schedule    = ${UNET_LR_SCHEDULE}"
+log "  lr schedule    = constant in the Baseline (Phases 1-2); searched in Phase 3 (constant|cosine|plateau)"
 log "  device         = ${GPU_DEVICE}   (Phase 5 bench device = ${BENCH_DEVICE})"
 log "  phases         = ${PHASES[*]}"
 log "  train budget   = ${TRAIN_EPOCHS:-120 (default)} epochs, patience ${TRAIN_PATIENCE:-120 (default)}  [Phases 1, 2, 4]"
