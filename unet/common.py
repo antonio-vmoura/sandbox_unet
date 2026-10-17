@@ -16,11 +16,14 @@ Protocols
   short per-trial budget.
 
 Baseline = base setup + default HPs; Optimised = base setup + tuned HPs. Only
-the **learning dynamics and augmentation** (:data:`TUNABLE_KEYS`) can differ;
-the architecture (width, activation, normalisation), optimiser type, loss,
-input size, batch, budget and precision are part of the base setup and can
-never be overridden (:data:`PROTECTED_KEYS`), so Baseline and Optimised have
-identical architecture and computational cost.
+the **learning dynamics (learning rate, its schedule and warm-up, weight decay,
+β₁), the BCE/Dice loss balance, dropout and augmentation** (:data:`TUNABLE_KEYS`)
+can differ; the architecture (width, activation, normalisation), optimiser type,
+loss family, input size, batch, budget and precision are part of the base setup
+and can never be overridden (:data:`PROTECTED_KEYS`), so Baseline and Optimised
+have identical architecture and computational cost. The Baseline itself is the
+pure reference recipe: constant learning rate 1e-3, no weight decay, no warm-up,
+BCE + Dice with equal weights.
 
 Output layout (see :class:`PipelinePaths`)::
 
@@ -93,8 +96,12 @@ BASE_SETUP: dict[str, Any] = {
     "optimizer": "AdamW",        # decoupled weight decay == Keras Adam(weight_decay=...)
     "adam_eps": 1e-7,            # Keras default epsilon
     "beta2": 0.999,
-    "lr_schedule": "constant",   # the original Keras baseline used a constant LR
-    "loss": "bce_dice",          # BCE + soft Dice (original Keras bce_dice_loss)
+    "loss": "bce_dice",          # BCE + dice_weight × (1 − soft Dice) (original Keras bce_dice_loss at weight 1)
+    # Fixed constants of the "plateau" LR schedule (inert under the Baseline's constant schedule):
+    # multiply the LR by plateau_factor after plateau_patience post-warm-up epochs without a strict
+    # improvement of the monitored metric, never below lr0 × lr_final_factor.
+    "plateau_factor": 0.5,
+    "plateau_patience": 5,
     # Data / budget / numerics
     "imgsz": IMGSZ,
     "batch": 16,
@@ -102,17 +109,25 @@ BASE_SETUP: dict[str, Any] = {
     "amp": False,
     "seed": SEED,
     "deterministic": True,
-    "monitor": "val_jsi",        # best-epoch and early-stopping criterion (ISIC ranking metric)
+    "monitor": "val_jsi",        # best-epoch, early-stopping and plateau criterion (ISIC ranking metric)
 }
 
 #: Default hyperparameters = the original Keras baseline, expressed with the
 #: names of the search space. Augmentation reproduces ImageDataGenerator(
 #: rotation_range=15, width/height_shift_range=0.1, zoom_range=0.1,
-#: horizontal_flip=True, vertical_flip=True, fill_mode="reflect").
+#: horizontal_flip=True, vertical_flip=True, fill_mode="reflect"). The
+#: learning-rate schedule and the loss balance are hyperparameters too: their
+#: defaults reproduce the Baseline exactly (constant LR, no warm-up, BCE + Dice
+#: with equal weights; ``lr_final_factor`` is inert under a constant schedule),
+#: and Phase 3 searches them (``tune_unet.SEARCH_SPACE``).
 DEFAULT_HPS: dict[str, Any] = {
     "lr0": 1e-3,
     "weight_decay": 0.0,
     "beta1": 0.9,
+    "lr_schedule": "constant",  # "constant" | "cosine" (to lr0 × lr_final_factor) | "plateau" (see BASE_SETUP)
+    "lr_final_factor": 0.01,    # final (cosine) / minimum (plateau) LR as a fraction of lr0
+    "warmup_epochs": 0,         # linear warm-up from 0.1 × lr0 to lr0 over the first warmup_epochs epochs
+    "dice_weight": 1.0,         # loss = BCE + dice_weight × (1 − soft Dice)
     "dropout": 0.1,
     "degrees": 15.0,     # rotation uniform in [-degrees, +degrees]
     "translate": 0.1,    # shift uniform in [-translate, +translate] × size (x and y independently)
@@ -120,6 +135,9 @@ DEFAULT_HPS: dict[str, Any] = {
     "fliplr": 0.5,       # horizontal-flip probability
     "flipud": 0.5,       # vertical-flip probability
 }
+
+#: Accepted values of ``lr_schedule``.
+LR_SCHEDULES: tuple[str, ...] = ("constant", "cosine", "plateau")
 
 #: The only keys an HPO search space / tuned YAML may contain.
 TUNABLE_KEYS: frozenset[str] = frozenset(DEFAULT_HPS)
@@ -218,6 +236,8 @@ def optimized_protocol(
     """
     tuned_hp = dict(tuned_hp or {})
     _check_tunable(tuned_hp, "Tuned hyperparameters")
+    if tuned_hp.get("lr_schedule", DEFAULT_HPS["lr_schedule"]) not in LR_SCHEDULES:
+        raise ValueError(f"lr_schedule must be one of {LR_SCHEDULES}, not {tuned_hp['lr_schedule']!r}")
     return {**baseline_protocol(device, epochs, patience), **tuned_hp}
 
 

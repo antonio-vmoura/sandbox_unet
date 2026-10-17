@@ -11,8 +11,12 @@ Contract (mirrors ``sandbox_yolo26/yolo26_seg/training.py``):
   the **complete** training state: model, optimiser, epoch, best score,
   early-stopping counter and the torch (CPU + CUDA), NumPy and Python RNG
   states. Data order and augmentation are pure functions of (seed, epoch,
-  sample) (see :mod:`data`). A resumed run is therefore **bit-identical** to
-  an uninterrupted one (on a given device and software stack).
+  sample) (see :mod:`data`), and every run seeds the Python, NumPy and torch
+  RNGs from ``protocol["seed"]`` before building the model, so its initial
+  weights do not depend on earlier work in the same process. A resumed run is
+  therefore **bit-identical** to an uninterrupted one, and a run is identical
+  whether it is the first or the n-th of its process (on a given device and
+  software stack).
 * ``<run_dir>/weights/best.pt`` holds the weights of the best epoch, the epoch
   number and its validation metrics, plus the model configuration, so it can
   be loaded stand-alone by Phase 5.
@@ -35,8 +39,17 @@ reported metrics are selected by the same rule, so they always agree.
 Loss: BCE + soft Dice, as the original Keras ``bce_dice_loss``: pixel-mean
 binary cross-entropy (computed from logits — the numerically stable form of
 Keras' BCE on sigmoid outputs, without Keras' 1e-7 probability clipping) plus
-``1 − Dice`` with the Dice coefficient computed over the whole batch
-(smooth = 1e-6).
+``dice_weight × (1 − Dice)`` with the Dice coefficient computed over the whole
+batch (smooth = 1e-6). The Baseline uses ``dice_weight = 1`` (the Keras loss
+exactly); Phase 3 searches it.
+
+Learning rate: :func:`epoch_lr` sets the rate of every epoch as a pure function
+of the protocol, the epoch and the checkpointed history — optional linear
+warm-up from ``0.1 × lr0``, then ``constant`` (the Baseline), ``cosine`` (to
+``lr0 × lr_final_factor``) or ``plateau`` (× ``plateau_factor`` after
+``plateau_patience`` epochs without a strict improvement of the monitored
+metric, floored at ``lr0 × lr_final_factor``). A resumed run therefore uses
+exactly the rates of an uninterrupted one.
 
 Validation metrics are computed per image with exactly the definitions of
 :mod:`segmentation_metrics` (threshold 0.5, empty-mask conventions), on the
@@ -90,13 +103,13 @@ DICE_SMOOTH: float = 1e-6
 # ----------------------------------------------------------------------------
 # Loss and metrics
 # ----------------------------------------------------------------------------
-def bce_dice_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """BCE (pixel mean, from logits) + (1 − batch-global soft Dice)."""
+def bce_dice_loss(logits: torch.Tensor, target: torch.Tensor, dice_weight: float = 1.0) -> torch.Tensor:
+    """BCE (pixel mean, from logits) + ``dice_weight`` × (1 − batch-global soft Dice)."""
     bce = F.binary_cross_entropy_with_logits(logits, target)
     p = torch.sigmoid(logits)
     inter = (p * target).sum()
     dice = (2 * inter + DICE_SMOOTH) / (p.sum() + target.sum() + DICE_SMOOTH)
-    return bce + (1 - dice)
+    return bce + dice_weight * (1 - dice)
 
 
 def batch_pixel_scores(logits: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -128,15 +141,15 @@ def batch_pixel_scores(logits: torch.Tensor, target: torch.Tensor) -> dict[str, 
 
 
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, loader, device: torch.device) -> dict[str, float]:
-    """Validation loss and per-image mean pixel metrics."""
+def evaluate(model: torch.nn.Module, loader, device: torch.device, dice_weight: float = 1.0) -> dict[str, float]:
+    """Validation loss (the training loss of the run) and per-image mean pixel metrics."""
     model.eval()
     loss_sum, n = 0.0, 0
     acc: dict[str, list[torch.Tensor]] = {}
     for x, y in loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         logits = model(x)
-        loss_sum += bce_dice_loss(logits, y).item() * len(x)
+        loss_sum += bce_dice_loss(logits, y, dice_weight).item() * len(x)
         n += len(x)
         for k, v in batch_pixel_scores(logits, y).items():
             acc.setdefault(k, []).append(v.cpu())
@@ -243,6 +256,51 @@ def protocol_fingerprint(protocol: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in protocol.items() if k not in _HASH_EXCLUDED}
 
 
+#: Warm-up starts at this fraction of ``lr0`` and rises linearly to ``lr0``.
+WARMUP_START_FACTOR: float = 0.1
+
+
+def epoch_lr(protocol: dict[str, Any], epoch: int, history: list[dict[str, Any]] = ()) -> float:
+    """Learning rate of ``epoch`` (1-based), a pure function of the protocol and the checkpointed history.
+
+    * Warm-up (``warmup_epochs`` = W > 0): epochs 1..W rise linearly from ``0.1 × lr0`` (epoch 1) towards ``lr0``.
+    * After the warm-up, ``lr_schedule``:
+      ``constant`` — ``lr0`` (the Baseline);
+      ``cosine`` — per-epoch cosine from ``lr0`` (epoch W+1) to ``lr0 × lr_final_factor`` (last epoch);
+      ``plateau`` — ``lr0`` multiplied by ``plateau_factor`` whenever ``plateau_patience`` post-warm-up epochs pass
+      without a strict improvement of ``monitor`` (counter reset after each reduction, as Keras'
+      ``ReduceLROnPlateau`` without cooldown), never below ``lr0 × lr_final_factor``. Only epochs before ``epoch``
+      are read from ``history`` (the rows of ``results.csv``), so a resumed run reproduces the rates exactly.
+    """
+    lr0 = protocol["lr0"]
+    warmup = int(protocol.get("warmup_epochs", 0))
+    if epoch <= warmup:
+        return lr0 * (WARMUP_START_FACTOR + (1 - WARMUP_START_FACTOR) * (epoch - 1) / warmup)
+    schedule = protocol.get("lr_schedule", "constant")
+    if schedule == "constant":
+        return lr0
+    floor_factor = protocol["lr_final_factor"]
+    if schedule == "cosine":
+        t = (epoch - 1 - warmup) / max(1, protocol["epochs"] - warmup - 1)
+        return lr0 * (floor_factor + (1 - floor_factor) * 0.5 * (1 + math.cos(math.pi * t)))
+    if schedule == "plateau":
+        lr, best, bad = lr0, -math.inf, 0
+        for row in history:
+            e = int(row["epoch"])
+            if e >= epoch:
+                break
+            if e <= warmup:
+                continue
+            if row[protocol["monitor"]] > best:
+                best, bad = row[protocol["monitor"]], 0
+            else:
+                bad += 1
+                if bad >= protocol["plateau_patience"]:
+                    lr, bad = max(lr * protocol["plateau_factor"], lr0 * floor_factor), 0
+        return lr
+    raise ValueError(f"unknown lr_schedule {schedule!r}")
+
+
 def train_or_resume(
     *,
     phase: str,
@@ -313,6 +371,12 @@ def _train_locked(phase, model_name, protocol, cache, train_ids, val_ids, projec
         atomic_write_json(state_path, state)
 
     device = torch_device(protocol["device"])
+    # Every run starts from the RNG state of its own seed, so its initial weights and dropout stream do not depend
+    # on what ran earlier in the same process (CV folds, HPO trials, skipped or resumed runs). A resumed run then
+    # restores the checkpointed RNG state below.
+    random.seed(protocol["seed"])
+    np.random.seed(protocol["seed"])
+    torch.manual_seed(protocol["seed"])
     model = build_model(protocol).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=protocol["lr0"],
                             betas=(protocol["beta1"], protocol["beta2"]),
@@ -355,6 +419,8 @@ def _train_locked(phase, model_name, protocol, cache, train_ids, val_ids, projec
         if final:
             break
         te = time.perf_counter()
+        for group in opt.param_groups:
+            group["lr"] = epoch_lr(protocol, epoch, history)
         model.train()
         train_ds.set_epoch(epoch)
         train_sampler.set_epoch(epoch)
@@ -362,12 +428,12 @@ def _train_locked(phase, model_name, protocol, cache, train_ids, val_ids, projec
         for x, y in train_loader:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            loss = bce_dice_loss(model(x), y)
+            loss = bce_dice_loss(model(x), y, protocol["dice_weight"])
             loss.backward()
             opt.step()
             loss_sum += loss.item() * len(x)
             n += len(x)
-        val = evaluate(model, val_loader, device)
+        val = evaluate(model, val_loader, device, protocol["dice_weight"])
         improved = val[protocol["monitor"]] > best_value
         if improved:
             best_value, best_epoch, bad_epochs = val[protocol["monitor"]], epoch, 0
