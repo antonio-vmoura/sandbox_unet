@@ -76,7 +76,7 @@ INSTANCE_KEYS: tuple[str, ...] = (
 #: Base-setup keys that must be identical between Baseline and Optimised runs.
 BASE_CHECK_KEYS: tuple[str, ...] = (
     "epochs", "patience", "amp", "seed", "batch", "imgsz", "n_filters", "activation",
-    "batchnorm", "optimizer", "adam_eps", "beta2", "loss", "plateau_factor", "plateau_patience", "monitor",
+    "batchnorm", "optimizer", "adam_eps", "beta2", "lr_schedule", "loss", "monitor",
 )
 PIXEL_KEYS: tuple[str, ...] = ("dsc", "jsi", "jsi_thr", "sensitivity", "specificity", "accuracy", "biou", "nsd", "hd95")
 

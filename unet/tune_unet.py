@@ -4,23 +4,14 @@ The search keeps the framework of the original pipeline (Optuna, TPE sampler,
 SQLite storage) and adds the same guarantees as YOLO26's ``SeededTuner``:
 
 Search space (strict "apples-to-apples")
-    The learning dynamics, the loss balance, dropout and augmentation are
-    searched (:data:`SEARCH_SPACE`, 13 hyperparameters): lr0, weight_decay,
-    beta1, the learning-rate schedule (``constant`` / ``cosine`` /
-    ``plateau``), its final/minimum factor ``lr_final_factor``, the linear
-    warm-up length ``warmup_epochs``, the Dice weight of the BCE + Dice loss
-    ``dice_weight``, dropout, degrees, translate, scale, fliplr, flipud.
-    Architecture, optimiser type, loss family, batch, budget and precision
-    belong to the base setup and cannot be searched.
-
-    The first trial trains the **exact** Baseline hyperparameters
-    (:data:`common.DEFAULT_HPS`: constant LR 1e-3, weight decay 0, no warm-up,
-    Dice weight 1, …), so the search starts from the Baseline itself. Optuna's
-    record of that trial — used only by the TPE model — stores the defaults
-    clipped into the distributions (``weight_decay`` 0 → 1e-6, the lower bound
-    of its log range); ``tune_results.csv`` and ``best_hyperparameters.yaml``
-    always report the values a trial actually trained with
-    (:func:`trained_params`).
+    Only the learning dynamics and augmentation are searched
+    (:data:`SEARCH_SPACE`: lr0, weight_decay, beta1, dropout, degrees,
+    translate, scale, fliplr, flipud). Architecture, optimiser type, loss,
+    batch, budget and precision belong to the base setup and cannot be
+    searched. The first trial evaluates the default (Baseline)
+    hyperparameters clipped to the bounds; note that the default
+    ``weight_decay = 0`` lies outside the log-scale range and is clipped to its
+    lower bound 1e-6.
 
 Reproducibility
     A fresh ``TPESampler`` is installed before every proposal, seeded from
@@ -82,13 +73,7 @@ from typing import Any
 import optuna
 import torch
 import yaml
-from optuna.distributions import (
-    BaseDistribution,
-    CategoricalDistribution,
-    FloatDistribution,
-    IntDistribution,
-    distribution_to_json,
-)
+from optuna.distributions import FloatDistribution
 from optuna.trial import TrialState
 
 from common import (
@@ -99,7 +84,6 @@ from common import (
     DEFAULT_PIPELINE_ROOT,
     HPO_EPOCHS,
     HPO_PATIENCE,
-    LR_SCHEDULES,
     PROTECTED_KEYS,
     SEED,
     TUNABLE_KEYS,
@@ -122,41 +106,24 @@ warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning
 EXIT_GPU_UNAVAILABLE: int = 75
 STATE_SCHEMA: int = 1
 
-#: Search space: name → Optuna distribution. Learning dynamics, loss balance, dropout and augmentation.
-SEARCH_SPACE: dict[str, BaseDistribution] = {
-    "lr0":             FloatDistribution(1e-4, 1e-2, log=True),
-    "weight_decay":    FloatDistribution(1e-6, 1e-3, log=True),   # trial 1 trains the Baseline's exact 0
-    "beta1":           FloatDistribution(0.80, 0.95),
-    "lr_schedule":     CategoricalDistribution(LR_SCHEDULES),     # constant | cosine | plateau
-    "lr_final_factor": FloatDistribution(0.005, 0.10, log=True),  # inert when lr_schedule = constant
-    "warmup_epochs":   IntDistribution(0, 5),
-    "dice_weight":     FloatDistribution(0.5, 2.0, log=True),     # loss = BCE + dice_weight × (1 − Dice)
-    "dropout":         FloatDistribution(0.10, 0.40),
-    "degrees":         FloatDistribution(0.0, 45.0),
-    "translate":       FloatDistribution(0.0, 0.20),
-    "scale":           FloatDistribution(0.0, 0.30),
-    "fliplr":          FloatDistribution(0.0, 0.50),
-    "flipud":          FloatDistribution(0.0, 0.50),
+#: Search space: name → (low, high, log). Learning dynamics + augmentation only.
+SEARCH_SPACE: dict[str, tuple[float, float, bool]] = {
+    "lr0":          (1e-4, 1e-2, True),
+    "weight_decay": (1e-6, 1e-3, True),
+    "beta1":        (0.80, 0.95, False),
+    "dropout":      (0.10, 0.40, False),
+    "degrees":      (0.0, 45.0, False),
+    "translate":    (0.0, 0.20, False),
+    "scale":        (0.0, 0.30, False),
+    "fliplr":       (0.0, 0.50, False),
+    "flipud":       (0.0, 0.50, False),
 }
 assert set(SEARCH_SPACE) <= TUNABLE_KEYS and not set(SEARCH_SPACE) & PROTECTED_KEYS
 
 #: Random-search trials before TPE modelling starts (Optuna default).
 TPE_STARTUP_TRIALS: int = 10
 
-DISTRIBUTIONS = SEARCH_SPACE
-
-
-def describe(dist: BaseDistribution) -> str:
-    """Compact text of a distribution for logs."""
-    if isinstance(dist, CategoricalDistribution):
-        return "{" + "|".join(map(str, dist.choices)) + "}"
-    kind = " int" if isinstance(dist, IntDistribution) else ""
-    return f"[{dist.low:g},{dist.high:g}]{' log' if dist.log else ''}{kind}"
-
-
-def fmt(value: Any) -> str:
-    """Compact text of a hyperparameter value."""
-    return f"{value:.4g}" if isinstance(value, float) else str(value)
+DISTRIBUTIONS = {k: FloatDistribution(lo, hi, log=log) for k, (lo, hi, log) in SEARCH_SPACE.items()}
 
 
 class GPUUnavailable(RuntimeError):
@@ -166,22 +133,9 @@ class GPUUnavailable(RuntimeError):
 # ----------------------------------------------------------------------------
 # Sampling
 # ----------------------------------------------------------------------------
-def first_trial_params() -> dict[str, Any]:
-    """Default (Baseline) hyperparameters clipped into the distributions — Optuna's record of trial 1."""
-    out = {}
-    for k, d in SEARCH_SPACE.items():
-        v = DEFAULT_HPS[k]
-        if isinstance(d, CategoricalDistribution):
-            assert v in d.choices, (k, v)
-        else:
-            v = type(d.low)(min(max(v, d.low), d.high))
-        out[k] = v
-    return out
-
-
-def trained_params(index: int, params: dict[str, Any]) -> dict[str, Any]:
-    """Hyperparameters a proposal actually trains with: the exact Baseline for index 0, else the proposal."""
-    return {k: DEFAULT_HPS[k] for k in SEARCH_SPACE} if index == 0 else dict(params)
+def first_trial_params() -> dict[str, float]:
+    """Default (Baseline) hyperparameters clipped to the search bounds."""
+    return {k: float(min(max(DEFAULT_HPS[k], lo), hi)) for k, (lo, hi, _) in SEARCH_SPACE.items()}
 
 
 def proposal_sampler(seed: int, index: int) -> optuna.samplers.BaseSampler:
@@ -203,10 +157,8 @@ def completed_trials(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:
 def write_outputs(trials: list[optuna.trial.FrozenTrial], tune_dir: Path) -> dict[str, Any]:
     """Write ``tune_results.csv`` and ``best_hyperparameters.yaml``; return progress counters."""
     keys = list(SEARCH_SPACE)
-    hps = [trained_params(t.user_attrs["proposal"], t.params) for t in trials]
     lines = [",".join(["fitness", *keys])]
-    lines += [",".join([repr(float(t.value)), *(repr(h[k]) if isinstance(h[k], float) else str(h[k]) for k in keys)])
-              for t, h in zip(trials, hps)]
+    lines += [",".join([repr(float(t.value)), *(repr(t.params[k]) for k in keys)]) for t in trials]
     tmp = tune_dir / ".tune_results.csv.tmp"
     tmp.write_text("\n".join(lines) + "\n")
     tmp.replace(tune_dir / "tune_results.csv")
@@ -219,8 +171,7 @@ def write_outputs(trials: list[optuna.trial.FrozenTrial], tune_dir: Path) -> dic
         header = (f"# Phase 3 best of {len(trials)} trial(s): trial {progress['best_trial']}, "
                   f"fitness (val JSI) = {best.value:.6f}\n")
         tmp = tune_dir / ".best_hyperparameters.yaml.tmp"
-        best_hp = trained_params(best.user_attrs["proposal"], best.params)
-        tmp.write_text(header + yaml.safe_dump({k: best_hp[k] for k in keys}, sort_keys=False))
+        tmp.write_text(header + yaml.safe_dump({k: float(best.params[k]) for k in keys}, sort_keys=False))
         tmp.replace(tune_dir / "best_hyperparameters.yaml")
     return progress
 
@@ -267,7 +218,7 @@ def gpu_healthy(device) -> bool:
 # ----------------------------------------------------------------------------
 def run_trial(index: int, params: dict[str, float], args, device, cache: CacheData, tune_dir: Path) -> float:
     """Train one trial (resumable) and return its fitness (val JSI of the best epoch)."""
-    protocol = hpo_trial_protocol(device, trained_params(index, params), args.epochs, args.patience)
+    protocol = hpo_trial_protocol(device, params, args.epochs, args.patience)
     result = train_or_resume(phase="phase3_hpo", model_name="unet", protocol=protocol, cache=cache,
                              train_ids=cache.ids("train"), val_ids=cache.ids("val"),
                              project=tune_dir / "trials", name=f"trial_{index:03d}")
@@ -294,11 +245,11 @@ def tune_one_model(model: str, args, device, cache: CacheData, paths: PipelinePa
     if args.force:
         backup_dir(tune_dir)
     config = {
-        "model": model, "space": {k: distribution_to_json(d) for k, d in SEARCH_SPACE.items()},
+        "model": model, "space": {k: list(v) for k, v in SEARCH_SPACE.items()},
         "base_setup": {k: v for k, v in BASE_SETUP.items() if k != "workers"},
         "trial_budget": {"epochs": args.epochs, "patience": args.patience},
         "seed": args.seed, "sampler": {"type": "TPE", "n_startup_trials": TPE_STARTUP_TRIALS,
-                                       "first_trial": "exact defaults (Optuna record clipped to bounds)"},
+                                       "first_trial": "defaults clipped to bounds"},
         "data": {"cache": cache.fingerprint(), "train": ids_fingerprint(cache.ids("train")),
                  "val": ids_fingerprint(cache.ids("val"))},
     }
@@ -346,7 +297,7 @@ def tune_one_model(model: str, args, device, cache: CacheData, paths: PipelinePa
             st["in_flight_trial"] = index + 1
             ckpt.save()
             print(f"\n  [trial {index + 1}/{args.iterations}] "
-                  + ", ".join(f"{k}={fmt(v)}" for k, v in trained_params(index, trial.params).items()), flush=True)
+                  + ", ".join(f"{k}={v:.4g}" for k, v in trial.params.items()), flush=True)
             try:
                 fitness = run_trial(index, trial.params, args, device, cache, tune_dir)
                 if not math.isfinite(fitness):
@@ -409,7 +360,8 @@ def main() -> int:
     cache = CacheData(args.cache)
     print(f"Phase 3 (HPO, Optuna {optuna.__version__} TPE) for {args.models}: "
           f"{args.iterations} trials x {args.epochs} ep (patience {args.patience}), seed {args.seed}")
-    print("  search space: " + ", ".join(f"{k}∈{describe(d)}" for k, d in SEARCH_SPACE.items()))
+    print("  search space: " + ", ".join(f"{k}∈[{lo:g},{hi:g}]{' log' if log else ''}"
+                                         for k, (lo, hi, log) in SEARCH_SPACE.items()))
     code = 0
     for m in args.models:
         print("\n" + "=" * 80 + f"\n=== TUNE {m}\n" + "=" * 80)

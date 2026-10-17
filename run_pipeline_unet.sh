@@ -15,11 +15,10 @@
 #                                    resolution and profiling as YOLO26)
 #
 # Every phase shares one base setup (U-Net 16 filters, ReLU, BN, AdamW,
-# BCE+Dice loss family, batch 16, FP32, seed 0; epochs=120 / patience=120 =
+# constant LR, BCE+Dice, batch 16, FP32, seed 0; epochs=120 / patience=120 =
 # no early stopping, for Phases 1, 2 and 4; HPO trials 30 / 30), defined once in unet/common.py, so the tuned
-# hyperparameters (learning rate, LR schedule and warm-up, weight decay, beta1,
-# Dice weight, dropout, augmentation) are the only variable between Baseline
-# (constant LR 1e-3, no weight decay, no warm-up, Dice weight 1) and Optimised.
+# hyperparameters (learning dynamics + augmentation) are the only variable
+# between Baseline and Optimised.
 #
 # Fault tolerance: every step is idempotent and resumable — re-running the
 # same command continues where it stopped; interrupted trainings resume
@@ -250,7 +249,6 @@ log "=============================================================="
 log "  yolo data      = ${YOLO_DATA_YAML}"
 log "  cache          = ${CACHE_DIR}"
 log "  project        = ${PROJECT}"
-log "  lr schedule    = constant in the Baseline (Phases 1-2); searched in Phase 3 (constant|cosine|plateau)"
 log "  device         = ${GPU_DEVICE}   (Phase 5 bench device = ${BENCH_DEVICE})"
 log "  phases         = ${PHASES[*]}"
 log "  train budget   = ${TRAIN_EPOCHS:-120 (default)} epochs, patience ${TRAIN_PATIENCE:-120 (default)}  [Phases 1, 2, 4]"
