@@ -45,9 +45,8 @@ base setup is identical in every phase and can never be overridden by a tuned fi
 | Base setup (fixed) | Value |
 |---|---|
 | Architecture | U-Net of the original Keras baseline: 16 base filters, ReLU, BatchNorm, 4 levels + bottleneck (2,161,649 parameters) |
-| Optimiser | AdamW (decoupled weight decay ≡ Keras `Adam(weight_decay)`), eps 1e-7, β2 0.999 |
-| Plateau-schedule constants | × 0.5 after 5 post-warm-up epochs without a strict val-JSI improvement (used only when `lr_schedule = plateau`) |
-| Loss family | BCE + `dice_weight` × (1 − soft Dice) (`dice_weight` = 1: the Keras `bce_dice_loss`) |
+| Optimiser / schedule | AdamW (decoupled weight decay ≡ Keras `Adam(weight_decay)`), eps 1e-7, β2 0.999, constant LR |
+| Loss | BCE + soft Dice (original Keras `bce_dice_loss`) |
 | Input / batch | 256×256, batch 16 |
 | Budget | 120 epochs, no early stopping (patience 120; HPO trials: 30 epochs, patience 30); `best.pt` = best validation JSI |
 | Numerics | FP32 (`amp=False`), seed 0, deterministic algorithms |
@@ -55,12 +54,8 @@ base setup is identical in every phase and can never be overridden by a tuned fi
 | Tuned (Phase 3) | Default (Baseline) | Search range |
 |---|---|---|
 | `lr0` | 1e-3 | [1e-4, 1e-2] log |
-| `weight_decay` | 0 | [1e-6, 1e-3] log *(trial 1 trains the exact Baseline, weight decay 0)* |
+| `weight_decay` | 0 | [1e-6, 1e-3] log *(the default 0 lies outside the log range; the first trial is clipped to 1e-6)* |
 | `beta1` | 0.9 | [0.80, 0.95] |
-| `lr_schedule` | constant | {constant, cosine, plateau} |
-| `lr_final_factor` | 0.01 (inert under constant) | [0.005, 0.10] log — cosine end point / plateau floor (× lr0) |
-| `warmup_epochs` | 0 | 0–5 (integer; linear from 0.1 · lr0) |
-| `dice_weight` | 1.0 | [0.5, 2.0] log |
 | `dropout` | 0.1 | [0.10, 0.40] |
 | `degrees` (rotation) | 15 | [0, 45] |
 | `translate` (shift) | 0.1 | [0, 0.20] |
@@ -193,7 +188,7 @@ F1) are present as `NaN`.
 **Efficiency (`benchmark_efficiency.py`)** — batch 1, one GPU, each configuration in a fresh process:
 
 * forward latency of the **fused** U-Net (BatchNorm folded, as Ultralytics' `fuse()` for YOLO26) on
-  1×3×256×256 with `torch.cuda.Event` (50 warm-up + 500 timed); end-to-end latency of the deployed pipeline
+  1×3×256×256 with `torch.cuda.Event` (2,000 warm-up + 500 timed; 2,000 so the GPU reaches its boost clock — one forward takes ≈ 1.6 ms); end-to-end latency of the deployed pipeline
   (test image at dataset resolution → resize → forward → upsample → threshold → mask on the host) with `perf_counter` (20 + 200);
 * mean, SD, median, P90/P95/P99, FPS = 1000 / mean;
 * **Driver-level VRAM**: `vram_process_peak_mb` = device memory held by the benchmark process at the end of the
@@ -206,7 +201,7 @@ F1) are present as `NaN`.
   VRAM, host RAM;
 * parameters (2,161,649; fused 2,158,705), GFLOPs (2 × MACs, thop) at the native 256×256 input (6.40) and,
   for a resolution-matched comparison with YOLO26, at 640×640 (`gflops_640`, 40.0);
-* contended runs (another process using the GPU) are flagged — re-run them on an idle GPU.
+* contended runs (another process holding > 100 MiB on the GPU before or after the benchmark) are flagged — re-run them on an idle GPU.
 
 Note for the comparison: the U-Net is benchmarked at its native 256×256 input, YOLO26 at 640×640; report
 both `gflops` and `gflops_640`.

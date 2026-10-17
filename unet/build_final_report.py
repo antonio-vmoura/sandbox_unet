@@ -65,6 +65,19 @@ from segmentation_metrics import LOWER_IS_BETTER
 from train_cv_unet import VAL_KEYS
 from training import RUN_STATE_FILE
 
+
+#: Same rule as ``benchmark_efficiency.CONTENTION_MEM_MIB``: a benchmark is contended when other processes held
+#: memory on its GPU in the snapshot taken before or after its worker. Re-applied here to the recorded nvidia-smi
+#: snapshots, so results stored under the earlier utilisation rule (``contended`` field) are classified the same way.
+CONTENTION_MEM_MIB: int = 100
+
+
+def contended(e: dict[str, Any]) -> bool:
+    """``True`` if another process held GPU memory before or after the benchmark worker ran."""
+    return any(isinstance((e.get(k) or {}).get("mem_used_mb"), (int, float))
+               and e[k]["mem_used_mb"] > CONTENTION_MEM_MIB for k in ("gpu_before", "gpu_after"))
+
+
 VARIANTS: tuple[str, ...] = ("baseline", "optimized")
 PRECISIONS: tuple[str, ...] = ("fp32", "fp16")
 
@@ -76,7 +89,7 @@ INSTANCE_KEYS: tuple[str, ...] = (
 #: Base-setup keys that must be identical between Baseline and Optimised runs.
 BASE_CHECK_KEYS: tuple[str, ...] = (
     "epochs", "patience", "amp", "seed", "batch", "imgsz", "n_filters", "activation",
-    "batchnorm", "optimizer", "adam_eps", "beta2", "loss", "plateau_factor", "plateau_patience", "monitor",
+    "batchnorm", "optimizer", "adam_eps", "beta2", "lr_schedule", "loss", "monitor",
 )
 PIXEL_KEYS: tuple[str, ...] = ("dsc", "jsi", "jsi_thr", "sensitivity", "specificity", "accuracy", "biou", "nsd", "hd95")
 
@@ -335,12 +348,12 @@ class Report:
                     if e is None:
                         self.warnings.append(f"phase5/{variant}_{m}_{prec}: efficiency missing")
                         continue
-                    if e.get("contended"):
+                    if contended(e):
                         self.warnings.append(f"phase5/{variant}_{m}_{prec}: benchmark ran on a busy GPU")
                     fw, ee, mem, mdl = e["forward"], e["end_to_end"], e["memory"], e["model"]
                     row = {
                         "variant": variant, "model": m, "precision": prec, "batch": 1,
-                        "gpu": e["env"].get("gpu"), "contended": e.get("contended"),
+                        "gpu": e["env"].get("gpu"), "contended": contended(e),
                         **{f"fwd_{k}": fw[k] for k in ("mean_ms", "std_ms", "median_ms", "p90_ms", "p95_ms", "p99_ms", "fps", "fps_median")},
                         **{f"e2e_{k}": ee[k] for k in ("mean_ms", "median_ms", "p95_ms", "p99_ms", "fps", "fps_median")},
                         **{f"e2e_dataset_{k}": (e.get("end_to_end_dataset") or {}).get(k)

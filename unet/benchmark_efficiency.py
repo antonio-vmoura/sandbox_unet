@@ -44,8 +44,9 @@ model-specific parts differ). For every ``variant`` × ``model`` ×
 
 Isolation & fairness (as YOLO26): every configuration runs in a **fresh
 subprocess**; ``cudnn.benchmark=True`` (recorded); warm-up iterations are
-discarded; GPU utilisation of other processes is recorded before/after each
-run and a busy GPU is flagged ``contended``.
+discarded; GPU memory / utilisation / clocks are recorded before and after each
+run, and a GPU on which other processes hold memory is flagged ``contended``
+(see ``CONTENTION_MEM_MIB``).
 
 Outputs::
 
@@ -97,8 +98,13 @@ PRECISIONS: tuple[str, ...] = ("fp32", "fp16")
 #: 3: + end_to_end_dataset scope; + driver-level process VRAM (as YOLO26).
 BENCHMARK_VERSION: int = 3
 
-#: GPU utilisation (%) above which a run is flagged as contended.
-CONTENTION_UTIL_PCT: int = 5
+#: Memory (MiB) used on the benchmark GPU by *other* processes above which a run is flagged as contended.
+#: The parent never creates a CUDA context and both snapshots are taken while no worker is alive (before it
+#: starts, after it has exited), so ``memory.used`` there is exactly what other processes hold — and any CUDA
+#: process holds at least its context (a few hundred MiB). Utilisation is recorded but not used: nvidia-smi
+#: averages it over its last sampling window, so for about a second after a worker exits it still shows that
+#: worker's own load (the earlier rule, utilisation > 5 %, flagged idle-GPU runs for this reason).
+CONTENTION_MEM_MIB: int = 100
 
 MB: float = 1024 ** 2
 
@@ -352,7 +358,7 @@ def run_worker(args: argparse.Namespace) -> dict[str, Any]:
 # Parent orchestration
 # ----------------------------------------------------------------------------
 def gpu_snapshot(device: str) -> dict[str, Any]:
-    """Utilisation / memory of the benchmark GPU right before a run (via nvidia-smi)."""
+    """Utilisation / memory / clocks of the benchmark GPU while no worker is alive (via nvidia-smi)."""
     if device == "cpu":
         return {}
     try:
@@ -372,7 +378,7 @@ def gpu_snapshot(device: str) -> dict[str, Any]:
             snap[k] = float(snap[k])
         except (KeyError, ValueError):
             pass
-    snap["contended"] = isinstance(snap.get("util_pct"), float) and snap["util_pct"] > CONTENTION_UTIL_PCT
+    snap["contended"] = isinstance(snap.get("mem_used_mb"), float) and snap["mem_used_mb"] > CONTENTION_MEM_MIB
     return snap
 
 
@@ -399,8 +405,8 @@ def benchmark_one(
 
     before = gpu_snapshot(args.device)
     if before.get("contended"):
-        print(f"  [warn] GPU {args.device} is busy ({before['util_pct']:.0f}% util, "
-              f"{before['mem_used_mb']:.0f} MB used) — latencies will be flagged as contended")
+        print(f"  [warn] GPU {args.device} is busy ({before['mem_used_mb']:.0f} MB used by other processes, "
+              f"{before['util_pct']:.0f}% util) — latencies will be flagged as contended")
     with tempfile.TemporaryDirectory() as tmp:
         tmp_json = Path(tmp) / "result.json"
         image_list = Path(tmp) / "e2e_images.json"
@@ -463,7 +469,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-root", default=None, help="YOLO dataset root (default: from the cache).")
     p.add_argument("--device", default="0", help="Single GPU id (default: 0); 'cpu' for smoke tests.")
     p.add_argument("--project", default=DEFAULT_PIPELINE_ROOT, help="Pipeline root.")
-    p.add_argument("--warmup", type=int, default=50, help="Discarded forward iterations (default: 50).")
+    # 2,000 (not 50 as SAM 3 / YOLO26): a U-Net forward takes ~1.6 ms, so 50 warm-up iterations (~0.1 s) end
+    # before the GPU leaves its idle clock state; 2,000 (~3 s) last about as long as the other models' warm-up.
+    p.add_argument("--warmup", type=int, default=2000, help="Discarded forward iterations (default: 2000).")
     p.add_argument("--iters", type=int, default=500, help="Timed forward iterations (default: 500).")
     p.add_argument("--e2e-warmup", type=int, default=20, help="Discarded predict() calls (default: 20).")
     p.add_argument("--e2e-iters", type=int, default=200, help="Timed predict() calls (default: 200).")
