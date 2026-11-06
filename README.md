@@ -1,9 +1,9 @@
 # U-Net — Skin Lesion Segmentation (ISIC 2018 Task 1), PyTorch
 
 This repository contains the U-Net arm of the study that compares segmentation architectures (YOLO26-seg, U-Net,
-SAM) on ISIC 2018 Task 1. It runs the **same 5-phase protocol, metrics, evaluation resolution, efficiency
-profiling and output schema as `sandbox_yolo26`**, so the two pipelines can be compared directly and analysed
-with the same notebooks.
+SAM 3) on ISIC 2018 Task 1. It runs the **same 5-phase protocol, metrics, evaluation resolution, efficiency
+profiling and output schema as `sandbox_yolo26` and `sandbox_sam3`**, so the three pipelines can be compared
+directly and analysed with the same notebooks.
 
 ---
 
@@ -11,16 +11,16 @@ with the same notebooks.
 
 | Aspect | How it is guaranteed |
 |---|---|
-| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2,594/100/1,000, the official split — same polygon labels). Every sample is addressed by its ISIC ID. |
+| **Same data** | Phase 0 builds the U-Net cache **from the YOLO26 dataset itself** (same images, same train/val/test split — 2,594/100/1,000, the official split — same official masks). Every sample is addressed by its ISIC ID. |
 | **Same CV folds** | The CV pool is in YOLO26's order and uses YOLO26's K-Fold algorithm (NumPy `RandomState(0)`, no scikit-learn) → **identical folds** (verified). |
-| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original dataset resolution and scored against the ground truth rasterised from the same YOLO labels. |
+| **Same metrics, ground truth and resolution** | `unet/segmentation_metrics.py` is a **byte-identical copy** of YOLO26's. Predictions (256×256) are upsampled to the original dataset resolution and scored against the official ISIC mask (`masks/<id>.png` of the YOLO26 dataset), the ground truth of the three pipelines. |
 | **Same profiling** | `benchmark_efficiency.py` is derived from YOLO26's: same `torch.cuda.Event` timing, statistics, steady-state VRAM, contention checks and JSON schema; same PyTorch version. |
 | **Same software stack** | The Docker image pins `torch==2.5.1` / `torchvision==0.20.1` (cu121) like YOLO26, plus `optuna==5.0.0`. |
 
-**Resolution ceiling.** A perfect 256×256 prediction, processed by the U-Net inference pipeline (bilinear
-upsampling to dataset resolution, threshold 0.5), scores **DSC 0.9967** on the test set (min 0.965) — the maximum
-achievable at the U-Net's input resolution (measured with an oracle model on the 994 test images of the earlier
-Roboflow export; **[re-measure on the official 1,000-image test set]**).
+**Resolution ceiling.** `unet/oracle_resolution_ceiling.py` passes the reference masks themselves, resized to
+256×256, through the U-Net inference path (bilinear upsampling to dataset resolution, threshold 0.5) and scores
+them like a prediction: the maximum achievable at the U-Net's input resolution (outputs in
+`logs/<pipeline>/oracle_ceiling/`).
 
 ---
 
@@ -242,7 +242,9 @@ sandbox_unet/
 │   ├── segmentation_metrics.py  # byte-identical to YOLO26's
 │   ├── train_baseline_models.py  train_cv_unet.py  consolidate_cv_results_unet.py  evaluate_cv_pixels.py
 │   ├── tune_unet.py  check_hpo_validity.py  train_optimized_unet.py  collect_phase_metrics_unet.py
-│   └── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
+│   ├── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
+│   ├── oracle_resolution_ceiling.py  # resolution ceiling of the 256×256 input (reference masks through the inference path)
+│   └── export_phase1_val_masks.py    # Phase 1 validation masks for the side-by-side figure of notebook 04
 ├── analysis/                  # every Jupyter notebook + the cross-architecture tooling
 │   ├── 01_internal_analysis.ipynb          # run first: every phase, from the first epoch of Phase 1
 │   ├── 02_segmentation_visualizer.ipynb    # Phase 5
@@ -281,9 +283,9 @@ screen -r unet_ft        # reattach
 Copy the results:
 
 ```bash
-rsync -avz --progress -e "ssh -p 13508" \
-    antoniovinicius@164.41.75.221:/home/antoniovinicius/projects/sandbox_unet/logs/pipeline_final_v1 \
-    /home/avmoura_linux/Documents/unb/SANDBOX_UNET/logs/
+rsync -avz --progress \
+    <user>@<server>:<path-to>/sandbox_unet/logs/pipeline_final_v1 \
+    ./logs/
 ```
 
 Hardware monitoring: `nvidia-smi`, `nvtop`.
