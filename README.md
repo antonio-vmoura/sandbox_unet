@@ -242,15 +242,13 @@ sandbox_unet/
 │   ├── segmentation_metrics.py  # byte-identical to YOLO26's
 │   ├── train_baseline_models.py  train_cv_unet.py  consolidate_cv_results_unet.py  evaluate_cv_pixels.py
 │   ├── tune_unet.py  check_hpo_validity.py  train_optimized_unet.py  collect_phase_metrics_unet.py
-│   ├── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
-│   └── legacy/                # previous TensorFlow/Keras scripts (not used)
+│   └── evaluate_test_set.py  benchmark_efficiency.py  build_final_report.py
 ├── analysis/                  # every Jupyter notebook + the cross-architecture tooling
 │   ├── 01_internal_analysis.ipynb          # run first: every phase, from the first epoch of Phase 1
 │   ├── 02_segmentation_visualizer.ipynb    # Phase 5
 │   ├── 03_metrics_and_efficiency.ipynb     # Phase 5
 │   ├── 04_cross_architecture_results.ipynb # Phase 5, all three architectures
-│   ├── results_aggregator.py
-│   └── legacy/                # earlier notebooks, incl. the original Keras U-Net (kept as a backup)
+│   └── results_aggregator.py
 └── datasets/  logs/           # not versioned
 ```
 
