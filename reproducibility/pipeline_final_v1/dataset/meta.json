@@ -1,0 +1,43 @@
+{
+  "created_at": "2026-10-01T19:02:22+00:00",
+  "params": {
+    "image_interp": "INTER_AREA",
+    "imgsz": 256,
+    "mask_interp": "INTER_AREA+threshold",
+    "mask_threshold": 0.5,
+    "prep_version": 1
+  },
+  "source_data_yaml": "../sandbox_yolo26/datasets/isic2018_task1_official/data.yaml",
+  "source_root": "../sandbox_yolo26/datasets/isic2018_task1_official",
+  "sources": {
+    "test": "322fb1fda23974770359d7766765cd06422d3da34593c091dc86ef55fff05840",
+    "train": "efa9f99baf4a14d80e822c9785f7d85a0056e0b7678fcadeef8f62b1b7a40680",
+    "val": "9f667d5d5c5debff6c9cdbe4ad318ccc35d50ae38df0ddec17e175783f6fba4c"
+  },
+  "splits": {
+    "test": {
+      "images_sha256": "13beffddef22cd74c6cd58501a609fa87c6bd73eb3bfa5ea078348ef65346799",
+      "manifest_sha256": "0c090b545a38da6b8d717e4d608bf5b504c7b33464e53053b960740cfb02520d",
+      "mask_foreground_fraction": 0.2799705810546875,
+      "masks_sha256": "036a70fafccc6fcdfdf0f856e7f31bb793c68a842ff447fb7148ae516a866917",
+      "n_empty_gt": 0,
+      "n_images": 1000
+    },
+    "train": {
+      "images_sha256": "61358d0900e6f843e64e1f3a80dd5a16cd82e313440f258e91ce839b00486822",
+      "manifest_sha256": "d0e489128e414b75dcfe39384fa72f30a6d0ca2d3bdc0a2bdd9ed04d27f96f38",
+      "mask_foreground_fraction": 0.2141787456197746,
+      "masks_sha256": "6c83354b640a98be1290557e37896b2beabdbdcde4934f5af8bd41e7bbcaee39",
+      "n_empty_gt": 0,
+      "n_images": 2594
+    },
+    "val": {
+      "images_sha256": "8253e9025d835c7352e79949b671c9acdb1221ce910e234ec604cbe543e3696b",
+      "manifest_sha256": "bc9cea47b61ef1f37b1a5f6993690c6f93dbeb8d0e9ebbd6e11cc248d17df7a3",
+      "mask_foreground_fraction": 0.2685966491699219,
+      "masks_sha256": "1280fd2c2fa917d322945801b494c32f40bd915174df4e1c402b0e4e06c88788",
+      "n_empty_gt": 0,
+      "n_images": 100
+    }
+  }
+}

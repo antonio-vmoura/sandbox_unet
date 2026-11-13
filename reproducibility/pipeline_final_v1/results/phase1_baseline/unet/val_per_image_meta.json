@@ -1,0 +1,13 @@
+{
+  "arch": "unet",
+  "model": "unet",
+  "label": "U-Net",
+  "split": "val (official, n=100)",
+  "source": "Phase 1 best.pt",
+  "weights": "logs/pipeline_final_v1/phase1_baseline/unet_baseline/weights/best.pt",
+  "weights_sha256": "68317a33a4deed75f795173b522c5240ec29c15c0cba4c0d93e8d5a5a72d0741",
+  "rule": "probability map upsampled bilinearly, threshold 0.5",
+  "device": "cpu",
+  "jsi_mean": 0.8113149706351344,
+  "dsc_mean": 0.8824458654938293
+}

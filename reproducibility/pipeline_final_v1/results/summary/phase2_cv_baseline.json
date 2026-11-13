@@ -1,0 +1,228 @@
+{
+  "missing": [],
+  "models": [
+    {
+      "model": "unet",
+      "n_folds": 5,
+      "per_fold": [
+        {
+          "best_epoch": 90,
+          "best_epoch_source": "best.pt",
+          "epochs_trained": 120,
+          "f1_b": NaN,
+          "f1_m": NaN,
+          "fitness": 0.8098351412262792,
+          "map5095_b": NaN,
+          "map5095_m": NaN,
+          "map50_b": NaN,
+          "map50_m": NaN,
+          "precision_b": NaN,
+          "precision_m": NaN,
+          "recall_b": NaN,
+          "recall_m": NaN,
+          "val_accuracy": 0.9539281671697443,
+          "val_dsc": 0.8833025966922698,
+          "val_jsi": 0.8098351412262792,
+          "val_jsi_thr": 0.7497507719123719,
+          "val_loss": 0.26256055225910196,
+          "val_pooled_dsc": 0.8951529270667125,
+          "val_pooled_jsi": 0.8102052754596593,
+          "val_sensitivity": 0.8811082217881029,
+          "val_specificity": 0.9769691772978465
+        },
+        {
+          "best_epoch": 86,
+          "best_epoch_source": "best.pt",
+          "epochs_trained": 120,
+          "f1_b": NaN,
+          "f1_m": NaN,
+          "fitness": 0.8220282575231487,
+          "map5095_b": NaN,
+          "map5095_m": NaN,
+          "map50_b": NaN,
+          "map50_m": NaN,
+          "precision_b": NaN,
+          "precision_m": NaN,
+          "recall_b": NaN,
+          "recall_m": NaN,
+          "val_accuracy": 0.9575973539051629,
+          "val_dsc": 0.8924944407727798,
+          "val_jsi": 0.8220282575231487,
+          "val_jsi_thr": 0.7730155223140222,
+          "val_loss": 0.24527227801161927,
+          "val_pooled_dsc": 0.8954591871382919,
+          "val_pooled_jsi": 0.8107071976980954,
+          "val_sensitivity": 0.8995220162384363,
+          "val_specificity": 0.9754668344587945
+        },
+        {
+          "best_epoch": 108,
+          "best_epoch_source": "best.pt",
+          "epochs_trained": 120,
+          "f1_b": NaN,
+          "f1_m": NaN,
+          "fitness": 0.8128458612054064,
+          "map5095_b": NaN,
+          "map5095_m": NaN,
+          "map50_b": NaN,
+          "map50_m": NaN,
+          "precision_b": NaN,
+          "precision_m": NaN,
+          "recall_b": NaN,
+          "recall_m": NaN,
+          "val_accuracy": 0.9571656915385117,
+          "val_dsc": 0.8833199481201349,
+          "val_jsi": 0.8128458612054064,
+          "val_jsi_thr": 0.7627979029418878,
+          "val_loss": 0.2437290422659858,
+          "val_pooled_dsc": 0.898085592677668,
+          "val_pooled_jsi": 0.8150230060609054,
+          "val_sensitivity": 0.8914839889299204,
+          "val_specificity": 0.9756325275915639
+        },
+        {
+          "best_epoch": 91,
+          "best_epoch_source": "best.pt",
+          "epochs_trained": 120,
+          "f1_b": NaN,
+          "f1_m": NaN,
+          "fitness": 0.797877698930906,
+          "map5095_b": NaN,
+          "map5095_m": NaN,
+          "map50_b": NaN,
+          "map50_m": NaN,
+          "precision_b": NaN,
+          "precision_m": NaN,
+          "recall_b": NaN,
+          "recall_m": NaN,
+          "val_accuracy": 0.9492593457393611,
+          "val_dsc": 0.8736373510751034,
+          "val_jsi": 0.797877698930906,
+          "val_jsi_thr": 0.7296116515685712,
+          "val_loss": 0.284152661493404,
+          "val_pooled_dsc": 0.879984872543546,
+          "val_pooled_jsi": 0.7856901670087127,
+          "val_sensitivity": 0.8898791765600059,
+          "val_specificity": 0.9730294479883694
+        },
+        {
+          "best_epoch": 117,
+          "best_epoch_source": "best.pt",
+          "epochs_trained": 120,
+          "f1_b": NaN,
+          "f1_m": NaN,
+          "fitness": 0.8158852652598054,
+          "map5095_b": NaN,
+          "map5095_m": NaN,
+          "map50_b": NaN,
+          "map50_m": NaN,
+          "precision_b": NaN,
+          "precision_m": NaN,
+          "recall_b": NaN,
+          "recall_m": NaN,
+          "val_accuracy": 0.9589869843096538,
+          "val_dsc": 0.8855115292371373,
+          "val_jsi": 0.8158852652598054,
+          "val_jsi_thr": 0.770924846486824,
+          "val_loss": 0.23742380018127895,
+          "val_pooled_dsc": 0.9015993946470907,
+          "val_pooled_jsi": 0.8208292951162498,
+          "val_sensitivity": 0.9072580092534475,
+          "val_specificity": 0.9704406827555766
+        }
+      ],
+      "source": "logs/pipeline_final_v1/phase2_cv_baseline/unet/metrics_summary.json",
+      "summary": {
+        "best_epoch": {
+          "mean": 98.4,
+          "std": 13.390294993016397
+        },
+        "epochs_trained": {
+          "mean": 120,
+          "std": 0.0
+        },
+        "f1_b": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "f1_m": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "fitness": {
+          "mean": 0.8116944448291091,
+          "std": 0.008944773578079681
+        },
+        "map5095_b": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "map5095_m": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "map50_b": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "map50_m": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "precision_b": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "precision_m": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "recall_b": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "recall_m": {
+          "mean": NaN,
+          "std": NaN
+        },
+        "val_accuracy": {
+          "mean": 0.9553875085324868,
+          "std": 0.003895049219089758
+        },
+        "val_dsc": {
+          "mean": 0.8836531731794851,
+          "std": 0.006748557903979262
+        },
+        "val_jsi": {
+          "mean": 0.8116944448291091,
+          "std": 0.008944773578079681
+        },
+        "val_jsi_thr": {
+          "mean": 0.7572201390447354,
+          "std": 0.017933520393865962
+        },
+        "val_loss": {
+          "mean": 0.254627666842278,
+          "std": 0.018953445109680504
+        },
+        "val_pooled_dsc": {
+          "mean": 0.8940563948146618,
+          "std": 0.008281141681567945
+        },
+        "val_pooled_jsi": {
+          "mean": 0.8084909882687246,
+          "std": 0.01344087875884513
+        },
+        "val_sensitivity": {
+          "mean": 0.8938502825539826,
+          "std": 0.009945662862863336
+        },
+        "val_specificity": {
+          "mean": 0.9743077340184302,
+          "std": 0.0025869853505579295
+        }
+      }
+    }
+  ],
+  "protocol": "baseline"
+}

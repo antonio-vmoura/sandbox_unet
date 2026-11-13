@@ -1,0 +1,36 @@
+{
+  "missing": [],
+  "models": [
+    {
+      "best_epoch": 96,
+      "best_epoch_source": "best.pt",
+      "epochs_trained": 120,
+      "f1_b": NaN,
+      "f1_m": NaN,
+      "fitness": 0.8212980867266026,
+      "map5095_b": NaN,
+      "map5095_m": NaN,
+      "map50_b": NaN,
+      "map50_m": NaN,
+      "model": "unet",
+      "precision_b": NaN,
+      "precision_m": NaN,
+      "recall_b": NaN,
+      "recall_m": NaN,
+      "resumed": false,
+      "run_dir": "logs/pipeline_final_v1/phase4_optimized/unet_optimized",
+      "split": "val",
+      "val_accuracy": 0.9397061157226563,
+      "val_dsc": 0.8937436454489557,
+      "val_jsi": 0.8212980867266026,
+      "val_jsi_thr": 0.7491068704169657,
+      "val_loss": 0.3030733186006546,
+      "val_pooled_dsc": 0.8877966640731928,
+      "val_pooled_jsi": 0.7982323334189474,
+      "val_sensitivity": 0.9233010680232608,
+      "val_specificity": 0.9459715038860966
+    }
+  ],
+  "phase": "phase4",
+  "split": "val"
+}
