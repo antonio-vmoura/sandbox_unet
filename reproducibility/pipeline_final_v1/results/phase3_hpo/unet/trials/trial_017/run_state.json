@@ -1,0 +1,73 @@
+{
+  "best_epoch": 15,
+  "best_pt": "logs/pipeline_final_v1/phase3_hpo/tune_unet/trials/trial_017/weights/best.pt",
+  "data": {
+    "cache": "2911224611ecf24c",
+    "n_train": 2594,
+    "n_val": 100,
+    "train": "b67ac10bc80b3201",
+    "val": "a1ba70239281e07d"
+  },
+  "epochs_trained": 30,
+  "events": [
+    {
+      "at": "2026-10-02T05:42:03+00:00",
+      "device": "cuda:0",
+      "event": "start",
+      "n_params": 2161649
+    },
+    {
+      "at": "2026-10-02T05:47:54+00:00",
+      "elapsed_min": 5.85,
+      "event": "complete"
+    }
+  ],
+  "metrics": {
+    "best_epoch": 15,
+    "epochs_trained": 30,
+    "val_accuracy": 0.9290824890136719,
+    "val_dsc": 0.8676526184342612,
+    "val_jsi": 0.7988268538304666,
+    "val_jsi_thr": 0.7356744365294204,
+    "val_loss": 0.39271449208259585,
+    "val_n_empty_pred": 0.0,
+    "val_pooled_dsc": 0.8585369832809655,
+    "val_pooled_jsi": 0.752137362933319,
+    "val_sensitivity": 0.8689542265483041,
+    "val_specificity": 0.972070823657506
+  },
+  "model": "unet",
+  "n_params": 2161649,
+  "phase": "phase3_hpo",
+  "protocol": {
+    "activation": "relu",
+    "adam_eps": 1e-07,
+    "amp": false,
+    "batch": 16,
+    "batchnorm": true,
+    "beta1": 0.8294707090780824,
+    "beta2": 0.999,
+    "degrees": 2.949369638964814,
+    "deterministic": true,
+    "dropout": 0.15307247808506627,
+    "epochs": 30,
+    "fliplr": 0.31172688633609924,
+    "flipud": 0.26652280678822604,
+    "imgsz": 256,
+    "loss": "bce_dice",
+    "lr0": 0.001098429490255221,
+    "lr_schedule": "constant",
+    "monitor": "val_jsi",
+    "n_filters": 16,
+    "optimizer": "AdamW",
+    "patience": 30,
+    "scale": 0.04254347460420709,
+    "seed": 0,
+    "translate": 0.056813331947227375,
+    "weight_decay": 0.00016695357275445615
+  },
+  "protocol_hash": "02ce70bea21e455e",
+  "run_dir": "logs/pipeline_final_v1/phase3_hpo/tune_unet/trials/trial_017",
+  "status": "complete",
+  "torch_version": "2.5.1+cu121"
+}

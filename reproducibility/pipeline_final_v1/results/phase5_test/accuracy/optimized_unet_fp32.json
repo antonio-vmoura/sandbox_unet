@@ -1,0 +1,142 @@
+{
+  "created_at": "2026-10-17T14:59:27+00:00",
+  "data": "../sandbox_yolo26/datasets/isic2018_task1_official/data.yaml",
+  "device": "Tesla V100S-PCIE-32GB",
+  "elapsed_min": 0.52,
+  "instance_conf": null,
+  "instance_metrics": {
+    "f1_b": NaN,
+    "f1_m": NaN,
+    "map5095_b": NaN,
+    "map5095_m": NaN,
+    "map50_b": NaN,
+    "map50_m": NaN,
+    "precision_b": NaN,
+    "precision_m": NaN,
+    "recall_b": NaN,
+    "recall_m": NaN
+  },
+  "mask_dir": "logs/pipeline_final_v1_old/phase5_test/masks/optimized_unet",
+  "model": "unet",
+  "n_images": 1000,
+  "per_image_csv": "logs/pipeline_final_v1_old/phase5_test/per_image/optimized_unet_fp32.csv",
+  "pixel_conf": 0.5,
+  "pixel_metrics": {
+    "accuracy": {
+      "ci95_high": 0.9303822676988527,
+      "ci95_low": 0.9165509136467835,
+      "mean": 0.9238172394396624,
+      "median": 0.9688598550425338,
+      "n": 1000,
+      "q1": 0.9172513591321515,
+      "q3": 0.9866732798619617,
+      "std": 0.1141398211296181
+    },
+    "biou": {
+      "ci95_high": 0.371288007874142,
+      "ci95_low": 0.34446941073299264,
+      "mean": 0.3580841289351255,
+      "median": 0.3337406985511373,
+      "n": 1000,
+      "q1": 0.16922602519185811,
+      "q3": 0.5444018713983195,
+      "std": 0.22120014483825765
+    },
+    "dsc": {
+      "ci95_high": 0.8795566459337041,
+      "ci95_low": 0.8609195123071973,
+      "mean": 0.8706187027190747,
+      "median": 0.9243825019538725,
+      "n": 1000,
+      "q1": 0.8527551684188026,
+      "q3": 0.9578306647467589,
+      "std": 0.15096547760951307
+    },
+    "hd95": {
+      "ci95_high": 96.88130787902573,
+      "ci95_low": 82.69534233947743,
+      "mean": 89.57883509515275,
+      "median": 39.53469657897949,
+      "n": 1000,
+      "q1": 16.0,
+      "q3": 134.3214454650879,
+      "std": 114.8108470888152
+    },
+    "jsi": {
+      "ci95_high": 0.8060445891185489,
+      "ci95_low": 0.7834367827830631,
+      "mean": 0.7951046208749278,
+      "median": 0.8593970594718392,
+      "n": 1000,
+      "q1": 0.7433070953457219,
+      "q3": 0.9190739332871336,
+      "std": 0.18450319607992322
+    },
+    "jsi_thr": {
+      "ci95_high": 0.7430697548969666,
+      "ci95_low": 0.7028683212722399,
+      "mean": 0.7234156046250863,
+      "median": 0.8593970594718392,
+      "n": 1000,
+      "q1": 0.7433070953457219,
+      "q3": 0.9190739332871336,
+      "std": 0.3264648107892876
+    },
+    "n_both_empty": 0,
+    "n_empty_gt": 0,
+    "n_empty_pred": 2,
+    "n_images": 1000,
+    "nsd": {
+      "ci95_high": 0.5798956210901524,
+      "ci95_low": 0.5427062456603474,
+      "mean": 0.5613715347993734,
+      "median": 0.5609090529867626,
+      "n": 1000,
+      "q1": 0.3007888521056237,
+      "q3": 0.8527296198620811,
+      "std": 0.3064267267721871
+    },
+    "pooled_dsc": 0.8511220269680104,
+    "pooled_jsi": 0.7408289191251747,
+    "sensitivity": {
+      "ci95_high": 0.9233088744390464,
+      "ci95_low": 0.902368320431914,
+      "mean": 0.9132428766766963,
+      "median": 0.9856652534193098,
+      "n": 1000,
+      "q1": 0.9239638512648236,
+      "q3": 0.9989198649033275,
+      "std": 0.16886423357398397
+    },
+    "specificity": {
+      "ci95_high": 0.9387590893470612,
+      "ci95_low": 0.9235380527442626,
+      "mean": 0.9312667901499695,
+      "median": 0.9777678870810647,
+      "n": 999,
+      "q1": 0.934728134143197,
+      "q3": 0.9917578841974857,
+      "std": 0.12417041227256025
+    }
+  },
+  "precision": "fp32",
+  "settings": {
+    "cache": "2911224611ecf24c",
+    "conf": 0.5,
+    "eval_version": 3,
+    "imgsz": 256,
+    "precision": "fp32",
+    "test_list_sha256": "4f65fc694bcbd7c3",
+    "weights_sha256": "de33cd7d4b82e19655b22ce7352f1e44fe4ebf6e7ef41d547f73444a35c9f052"
+  },
+  "settings_hash": "381ee324019ff6fc",
+  "split": "test",
+  "torch_version": "2.5.1+cu121",
+  "ultralytics_speed_ms": {
+    "inference": 12.307207006961107,
+    "postprocess": NaN,
+    "preprocess": NaN
+  },
+  "variant": "optimized",
+  "weights": "logs/pipeline_final_v1_old/phase4_optimized/unet_optimized/weights/best.pt"
+}
